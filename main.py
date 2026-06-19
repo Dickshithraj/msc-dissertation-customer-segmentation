@@ -40,6 +40,10 @@ def run_pipeline() -> None:
     from src.features import build_customer_features
     build_customer_features()
 
+    # Stage 2b – Preprocessing (log1p + StandardScaler)
+    from src.preprocessing import preprocess_features
+    preprocess_features()
+
     # Stage 3 – Clustering
     # from src.clustering import run_kmeans, run_hdbscan
     # run_kmeans()

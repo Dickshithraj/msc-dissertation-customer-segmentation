@@ -31,6 +31,8 @@ SHEET_2010_2011: str = "Year 2010-2011"
 # ---------------------------------------------------------------------------
 CLEANED_PARQUET: Path = DATA_PROCESSED_DIR / "cleaned_transactions.parquet"
 CUSTOMER_FEATURES_PARQUET: Path = DATA_PROCESSED_DIR / "customer_features.parquet"
+SCALED_FEATURES_PARQUET: Path = DATA_PROCESSED_DIR / "scaled_features.parquet"
+SCALER_PATH: Path = DATA_PROCESSED_DIR / "fitted_scaler.joblib"
 RFM_PARQUET: Path = DATA_PROCESSED_DIR / "rfm_features.parquet"
 CLV_PARQUET: Path = DATA_PROCESSED_DIR / "clv_features.parquet"
 CLUSTER_PARQUET: Path = DATA_PROCESSED_DIR / "clustered_customers.parquet"
@@ -39,6 +41,11 @@ CLUSTER_PARQUET: Path = DATA_PROCESSED_DIR / "clustered_customers.parquet"
 # Reproducibility
 # ---------------------------------------------------------------------------
 RANDOM_STATE: int = 42
+
+# ---------------------------------------------------------------------------
+# Preprocessing
+# ---------------------------------------------------------------------------
+SKEW_THRESHOLD: float = 0.5   # features with |skew| > threshold receive log1p
 
 # ---------------------------------------------------------------------------
 # Data-cleaning thresholds
