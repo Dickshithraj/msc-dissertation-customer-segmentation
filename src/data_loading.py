@@ -59,7 +59,7 @@ def _load_sheet(sheet_name: str, year_label: str) -> pd.DataFrame:
         dtype=_DTYPE_MAP,
     )
     df["Year"] = year_label
-    logger.info("  → %d rows loaded.", len(df))
+    logger.info("  -> %d rows loaded.", len(df))
     return df
 
 

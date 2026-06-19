@@ -272,11 +272,11 @@ def preprocess_features(
     scaled_df = pd.DataFrame(X_scaled, columns=FEATURE_COLS, index=df.index)
 
     logger.info(
-        "Scaling complete. Means ≈ %s",
+        "Scaling complete. Means ~= %s",
         np.round(X_scaled.mean(axis=0), 4),
     )
     logger.info(
-        "Std devs ≈ %s",
+        "Std devs ~= %s",
         np.round(X_scaled.std(axis=0), 4),
     )
 

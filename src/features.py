@@ -272,7 +272,7 @@ def build_customer_features() -> pd.DataFrame:
     """
     logger.info("Loading cleaned transactions from %s", CLEANED_PARQUET)
     df = pd.read_parquet(CLEANED_PARQUET)
-    logger.info("  → %d transaction rows, %d unique customers.",
+    logger.info("  -> %d transaction rows, %d unique customers.",
                 len(df), df["Customer ID"].nunique())
 
     snapshot = _compute_snapshot_date(df)
