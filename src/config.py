@@ -72,6 +72,8 @@ CLV_TIME_MONTHS: int = 12               # forecast horizon in months
 # K-Means sweep range
 KMEANS_K_MIN: int = 2
 KMEANS_K_MAX: int = 10
+# Set to an int to override automatic silhouette-based selection; None = auto.
+KMEANS_BEST_K: int | None = None
 
 # HDBSCAN
 HDBSCAN_MIN_CLUSTER_SIZE: int = 50

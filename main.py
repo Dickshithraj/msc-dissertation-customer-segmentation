@@ -45,9 +45,8 @@ def run_pipeline() -> None:
     preprocess_features()
 
     # Stage 3 – Clustering
-    # from src.clustering import run_kmeans, run_hdbscan
-    # run_kmeans()
-    # run_hdbscan()
+    from src.clustering import run_clustering
+    run_clustering()
 
     # Stage 4 – Cluster profiling & visualisation
     # from src.profiling import profile_clusters
