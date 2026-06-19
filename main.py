@@ -31,8 +31,10 @@ def run_pipeline() -> None:
     logger.info("Pipeline started.")
 
     # Stage 1 – Data ingestion & cleaning
-    # from src.data_loader import load_and_clean
-    # load_and_clean()
+    from src.data_loading import load_raw_data
+    from src.cleaning import clean_transactions
+    raw = load_raw_data()
+    clean_transactions(raw)
 
     # Stage 2 – Feature engineering (RFM + CLV)
     # from src.features import build_rfm, build_clv
