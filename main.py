@@ -36,10 +36,9 @@ def run_pipeline() -> None:
     raw = load_raw_data()
     clean_transactions(raw)
 
-    # Stage 2 – Feature engineering (RFM + CLV)
-    # from src.features import build_rfm, build_clv
-    # build_rfm()
-    # build_clv()
+    # Stage 2 – Feature engineering
+    from src.features import build_customer_features
+    build_customer_features()
 
     # Stage 3 – Clustering
     # from src.clustering import run_kmeans, run_hdbscan

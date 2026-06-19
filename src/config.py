@@ -30,6 +30,7 @@ SHEET_2010_2011: str = "Year 2010-2011"
 # Processed data artefacts
 # ---------------------------------------------------------------------------
 CLEANED_PARQUET: Path = DATA_PROCESSED_DIR / "cleaned_transactions.parquet"
+CUSTOMER_FEATURES_PARQUET: Path = DATA_PROCESSED_DIR / "customer_features.parquet"
 RFM_PARQUET: Path = DATA_PROCESSED_DIR / "rfm_features.parquet"
 CLV_PARQUET: Path = DATA_PROCESSED_DIR / "clv_features.parquet"
 CLUSTER_PARQUET: Path = DATA_PROCESSED_DIR / "clustered_customers.parquet"
