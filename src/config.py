@@ -75,6 +75,13 @@ KMEANS_K_MAX: int = 10
 # Set to an int to override automatic silhouette-based selection; None = auto.
 KMEANS_BEST_K: int | None = None
 
+# ---------------------------------------------------------------------------
+# Cluster validation
+# ---------------------------------------------------------------------------
+N_BOOTSTRAP_ITERATIONS: int = 50      # bootstrap resampling rounds for ARI stability
+ARI_STABILITY_THRESHOLD: float = 0.70 # min mean ARI to declare a solution "stable"
+MAX_HDBSCAN_NOISE_FRACTION: float = 0.30  # above this, HDBSCAN is penalised in selection
+
 # HDBSCAN
 HDBSCAN_MIN_CLUSTER_SIZE: int = 50
 HDBSCAN_MIN_SAMPLES: int = 5

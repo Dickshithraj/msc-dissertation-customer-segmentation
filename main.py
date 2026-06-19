@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from src.validation import ValidationResult
 
 # Ensure the project root is on the import path when running as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -61,6 +62,7 @@ def _print_pipeline_summary(
     kmeans_metrics: pd.DataFrame,
     kmeans_sizes: dict[int, int],
     hdbscan_sizes: dict[int, int],
+    validation: ValidationResult,
     elapsed: float,
 ) -> None:
     """Print a structured end-of-run summary covering all four stages."""
@@ -126,6 +128,29 @@ def _print_pipeline_summary(
     _row("    Genuine clusters:", str(len(hdbscan_sizes) - (1 if -1 in hdbscan_sizes else 0)))
     _row("    Noise points:", f"{n_noise:,}  ({n_noise/sum(hdbscan_sizes.values())*100:.1f}%)")
 
+    # ── Stage 3b: Validation & Stability ───────────────────────────────────
+    print(f"\n  STAGE 3b - Cluster Validation & Stability")
+    _divider()
+    _row("Metric", "K-Means        HDBSCAN        Better")
+    _divider()
+    m = validation.metrics_df
+    for metric, better in [("silhouette", "higher"), ("davies_bouldin", "lower"),
+                           ("calinski_harabasz", "higher")]:
+        km_val = m.loc["K-Means", metric] if "K-Means" in m.index else float("nan")
+        hdb_val = m.loc["HDBSCAN", metric] if "HDBSCAN" in m.index else float("nan")
+        _row(f"  {metric}", f"{km_val:<15.4f}{hdb_val:<15.4f}({better})")
+    _divider()
+    _row("Stability (bootstrap ARI)", "Mean           Std            Stable?")
+    _divider()
+    s = validation.stability_df
+    for algo in s.index:
+        mean = s.loc[algo, "ARI_mean"]
+        std = s.loc[algo, "ARI_std"]
+        stable = "Yes" if s.loc[algo, "Stable"] else "No"
+        _row(f"  {algo}", f"{mean:<15.4f}{std:<15.4f}{stable}")
+    _divider()
+    _row("Selected algorithm:", validation.best_algorithm)
+
     # ── Files written ───────────────────────────────────────────────────────
     print(f"\n  OUTPUTS")
     _divider()
@@ -142,6 +167,8 @@ def _print_pipeline_summary(
         "outputs/figures/scaling_effect.png",
         "outputs/figures/kmeans_selection.png",
         "outputs/figures/cluster_pca_projection.png",
+        "outputs/tables/cluster_validation.csv",
+        "outputs/figures/stability_ari.png",
     ]
     for path in outputs:
         print(_check(path))
@@ -186,6 +213,10 @@ def run_pipeline() -> None:
     kmeans_sizes = cluster_df["KMeans_Cluster"].value_counts().sort_index().to_dict()
     hdbscan_sizes = cluster_df["HDBSCAN_Cluster"].value_counts().sort_index().to_dict()
 
+    # Stage 3b – Cluster validation & stability
+    from src.validation import run_validation
+    validation = run_validation()
+
     # Stage 4 – Cluster profiling & visualisation
     # from src.profiling import profile_clusters
     # profile_clusters()
@@ -212,6 +243,7 @@ def run_pipeline() -> None:
         kmeans_metrics=kmeans_metrics,
         kmeans_sizes=kmeans_sizes,
         hdbscan_sizes=hdbscan_sizes,
+        validation=validation,
         elapsed=time.time() - t0,
     )
 
