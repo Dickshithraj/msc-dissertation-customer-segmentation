@@ -62,9 +62,10 @@ def _print_pipeline_summary(
     kmeans_sizes: dict[int, int],
     hdbscan_sizes: dict[int, int],
     validation: ValidationResult,
+    profiles: "pd.DataFrame",
     elapsed: float,
 ) -> None:
-    """Print a structured end-of-run summary covering all four stages."""
+    """Print a structured end-of-run summary covering all stages."""
 
     _banner("PIPELINE SUMMARY - Customer Segmentation Project")
 
@@ -153,6 +154,19 @@ def _print_pipeline_summary(
     _divider()
     _row("Selected algorithm:", validation.best_algorithm)
 
+    # ── Stage 6: Cluster profiling ──────────────────────────────────────────
+    print(f"\n  STAGE 6 - Segment Profiles ({validation.best_algorithm})")
+    _divider()
+    _row("Segment", "n        %      Recency  Frequency  Monetary")
+    _divider()
+    for cid, row in profiles.iterrows():
+        tag = " (noise)" if cid == -1 else ""
+        _row(
+            f"  C{cid}{tag}: {row['segment_name']}",
+            f"{int(row['size']):<9,}{row['pct_of_total']:<7.1f}"
+            f"{row['Recency']:<9.0f}{row['Frequency']:<11.1f}{row['Monetary']:.0f}",
+        )
+
     # ── Files written ───────────────────────────────────────────────────────
     print(f"\n  OUTPUTS")
     _divider()
@@ -171,6 +185,9 @@ def _print_pipeline_summary(
         "outputs/figures/cluster_pca_projection.png",
         "outputs/tables/cluster_validation.csv",
         "outputs/figures/stability_ari.png",
+        "outputs/tables/segment_profiles.csv",
+        "outputs/figures/segment_profiles.png",
+        "outputs/figures/radar_profiles.png",
     ]
     for path in outputs:
         print(_check(path))
@@ -233,9 +250,10 @@ def run_pipeline() -> None:
     from src.validation import run_validation
     validation = run_validation(X=prep.X_scaled, labels_dict=labels_dict)
 
-    # Stage 4 – Cluster profiling & visualisation
-    # from src.profiling import profile_clusters
-    # profile_clusters()
+    # Stage 6 – Cluster profiling & segment naming
+    from src.profiling import profile_clusters
+    best_algo = validation.best_algorithm
+    profiles = profile_clusters(algo=best_algo)  # used in summary below
 
     # Stage 5 – XGBoost cluster classifier
     # from src.classifier import train_classifier
@@ -260,6 +278,7 @@ def run_pipeline() -> None:
         kmeans_sizes=kmeans_sizes,
         hdbscan_sizes=hdbscan_sizes,
         validation=validation,
+        profiles=profiles,
         elapsed=time.time() - t0,
     )
 
