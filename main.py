@@ -67,6 +67,7 @@ def _print_pipeline_summary(
     clv_df: "pd.DataFrame",
     churn_df: "pd.DataFrame",
     churn_metrics: "pd.DataFrame",
+    migration: dict,
     elapsed: float,
 ) -> None:
     """Print a structured end-of-run summary covering all stages."""
@@ -202,6 +203,22 @@ def _print_pipeline_summary(
     _row("Best churn model:", f"{best_churn}  (ROC-AUC={churn_metrics.loc[best_churn,'ROC_AUC']:.4f})")
     _row("Mean churn probability:", f"{churn_df['churn_probability'].mean():.3f}")
 
+    # ── Stage 9: Segment migration (year-on-year) ───────────────────────────
+    print(f"\n  STAGE 9 - Year-on-Year Segment Migration")
+    _divider()
+    ctx = migration["context"]
+    _row("Retained (both years):", f"{ctx['retained_both_years']:,}")
+    _row("Lapsed (year 1 only):", f"{ctx['year1_only_lapsed']:,}")
+    _row("New (year 2 only):", f"{ctx['year2_only_new']:,}")
+    _divider()
+    _row("Segment retention", "Stayed in same segment (year 1 -> year 2)")
+    _divider()
+    rates = migration["rates"]
+    counts = migration["counts"]
+    for seg in rates.index:
+        if counts.loc[seg].sum() > 0:
+            _row(f"  {seg}", f"{rates.loc[seg, seg]*100:.1f}%")
+
     # ── Files written ───────────────────────────────────────────────────────
     print(f"\n  OUTPUTS")
     _divider()
@@ -230,6 +247,9 @@ def _print_pipeline_summary(
         "outputs/tables/churn_model_comparison.csv",
         "outputs/figures/churn_roc_curves.png",
         "outputs/figures/churn_feature_importance.png",
+        "outputs/tables/segment_migration_counts.csv",
+        "outputs/tables/segment_migration_rates.csv",
+        "outputs/figures/segment_migration.png",
     ]
     for path in outputs:
         print(_check(path))
@@ -306,6 +326,10 @@ def run_pipeline() -> None:
     churn_df = run_churn(features=features_df)
     churn_metrics = pd.read_csv(TABLES_DIR / "churn_model_comparison.csv", index_col=0)
 
+    # Stage 9 – Year-on-year segment migration
+    from src.migration import run_migration
+    migration = run_migration(transactions=cleaned)
+
     logger.info("Pipeline complete.")
 
     # ── Print consolidated summary ───────────────────────────────────────────
@@ -325,6 +349,7 @@ def run_pipeline() -> None:
         clv_df=clv_df,
         churn_df=churn_df,
         churn_metrics=churn_metrics,
+        migration=migration,
         elapsed=time.time() - t0,
     )
 
