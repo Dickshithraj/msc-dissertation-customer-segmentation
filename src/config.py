@@ -109,6 +109,13 @@ XGB_COLSAMPLE_BYTREE: float = 0.8
 TEST_SIZE: float = 0.2
 
 # ---------------------------------------------------------------------------
+# Churn classification (Phase 8)
+# ---------------------------------------------------------------------------
+CHURN_RECENCY_PERCENTILE: float = 0.90   # Recency above this percentile = churned
+CHURN_CV_FOLDS: int = 5                  # stratified CV folds for ROC-AUC
+CUSTOMER_CHURN_PARQUET: Path = DATA_PROCESSED_DIR / "customer_churn.parquet"
+
+# ---------------------------------------------------------------------------
 # Notification / marketing rules (cluster-based)
 # ---------------------------------------------------------------------------
 NOTIFICATION_CONFIG: dict[str, dict] = {

@@ -65,6 +65,8 @@ def _print_pipeline_summary(
     validation: ValidationResult,
     profiles: "pd.DataFrame",
     clv_df: "pd.DataFrame",
+    churn_df: "pd.DataFrame",
+    churn_metrics: "pd.DataFrame",
     elapsed: float,
 ) -> None:
     """Print a structured end-of-run summary covering all stages."""
@@ -183,6 +185,23 @@ def _print_pipeline_summary(
     _row("Top-decile CLV share:", f"{top_share:.1f}%  (top 10% of customers)")
     _row("Mean P(alive):", f"{clv_df['prob_alive'].mean():.3f}")
 
+    # ── Stage 8: Churn classification ───────────────────────────────────────
+    print(f"\n  STAGE 8 - Churn Classification")
+    _divider()
+    _row("Churn rate (label):", f"{churn_df['churn_label'].mean()*100:.1f}%  "
+                                 f"({int(churn_df['churn_label'].sum()):,} churned)")
+    _divider()
+    _row("Model", "ROC-AUC   PR-AUC    F1       CV ROC-AUC")
+    _divider()
+    for model, row in churn_metrics.iterrows():
+        _row(f"  {model}",
+             f"{row['ROC_AUC']:<10.4f}{row['PR_AUC']:<10.4f}"
+             f"{row['F1']:<9.4f}{row['CV_ROC_AUC_mean']:.4f}")
+    _divider()
+    best_churn = churn_metrics["ROC_AUC"].idxmax()
+    _row("Best churn model:", f"{best_churn}  (ROC-AUC={churn_metrics.loc[best_churn,'ROC_AUC']:.4f})")
+    _row("Mean churn probability:", f"{churn_df['churn_probability'].mean():.3f}")
+
     # ── Files written ───────────────────────────────────────────────────────
     print(f"\n  OUTPUTS")
     _divider()
@@ -207,6 +226,10 @@ def _print_pipeline_summary(
         "data/processed/customer_clv.parquet",
         "outputs/tables/clv_summary.csv",
         "outputs/figures/clv_distribution.png",
+        "data/processed/customer_churn.parquet",
+        "outputs/tables/churn_model_comparison.csv",
+        "outputs/figures/churn_roc_curves.png",
+        "outputs/figures/churn_feature_importance.png",
     ]
     for path in outputs:
         print(_check(path))
@@ -278,6 +301,11 @@ def run_pipeline() -> None:
     from src.clv import build_clv
     clv_df = build_clv(transactions=cleaned)
 
+    # Stage 8 – Churn classification (LogReg / RandomForest / XGBoost)
+    from src.churn import run_churn
+    churn_df = run_churn(features=features_df)
+    churn_metrics = pd.read_csv(TABLES_DIR / "churn_model_comparison.csv", index_col=0)
+
     logger.info("Pipeline complete.")
 
     # ── Print consolidated summary ───────────────────────────────────────────
@@ -295,6 +323,8 @@ def run_pipeline() -> None:
         validation=validation,
         profiles=profiles,
         clv_df=clv_df,
+        churn_df=churn_df,
+        churn_metrics=churn_metrics,
         elapsed=time.time() - t0,
     )
 
