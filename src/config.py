@@ -116,9 +116,15 @@ CHURN_CV_FOLDS: int = 5                  # stratified CV folds for ROC-AUC
 CUSTOMER_CHURN_PARQUET: Path = DATA_PROCESSED_DIR / "customer_churn.parquet"
 
 # ---------------------------------------------------------------------------
-# Notification / marketing rules (cluster-based)
+# Notification / marketing rules (Phase 10)
 # ---------------------------------------------------------------------------
-NOTIFICATION_CONFIG: dict[str, dict] = {
-    # Keys are cluster label strings; values are campaign parameters.
-    # Populated once cluster profiles are stable.
-}
+# Churn-probability bands used to escalate / de-prioritise campaigns.
+NOTIF_CHURN_HIGH: float = 0.50    # >= this churn prob = high risk
+NOTIF_CHURN_MED: float = 0.25     # >= this (and < HIGH) = medium risk
+# CLV quantiles used to assign value tiers (computed on the customer base).
+NOTIF_CLV_HIGH_Q: float = 0.80    # >= 80th pct CLV = high value
+NOTIF_CLV_LOW_Q: float = 0.40     # <  40th pct CLV = low value
+# Fraction of a customer's typical inter-purchase gap at which to re-contact.
+NOTIF_CADENCE_FRACTION: float = 0.6
+NOTIF_DEFAULT_CONTACT_DAYS: int = 30   # fallback for one-time buyers
+NOTIFICATION_PLAN_CSV: Path = OUTPUTS_TABLES_DIR / "notification_plan.csv"

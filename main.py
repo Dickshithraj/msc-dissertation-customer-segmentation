@@ -68,6 +68,7 @@ def _print_pipeline_summary(
     churn_df: "pd.DataFrame",
     churn_metrics: "pd.DataFrame",
     migration: dict,
+    plan: "pd.DataFrame",
     elapsed: float,
 ) -> None:
     """Print a structured end-of-run summary covering all stages."""
@@ -219,6 +220,21 @@ def _print_pipeline_summary(
         if counts.loc[seg].sum() > 0:
             _row(f"  {seg}", f"{rates.loc[seg, seg]*100:.1f}%")
 
+    # ── Stage 10: Notification engine ───────────────────────────────────────
+    print(f"\n  STAGE 10 - Rule-Based Notification Plan")
+    _divider()
+    _row("Customers with a plan:", f"{len(plan):,}")
+    _divider()
+    _row("Campaign action", "Customers")
+    _divider()
+    for action, cnt in plan["action"].value_counts().items():
+        _row(f"  {action}", f"{cnt:,}")
+    _divider()
+    _row("Priority breakdown", "Customers (5 = most urgent)")
+    _divider()
+    for pri, cnt in plan["priority"].value_counts().sort_index(ascending=False).items():
+        _row(f"  Priority {pri}", f"{cnt:,}")
+
     # ── Files written ───────────────────────────────────────────────────────
     print(f"\n  OUTPUTS")
     _divider()
@@ -250,6 +266,7 @@ def _print_pipeline_summary(
         "outputs/tables/segment_migration_counts.csv",
         "outputs/tables/segment_migration_rates.csv",
         "outputs/figures/segment_migration.png",
+        "outputs/tables/notification_plan.csv",
     ]
     for path in outputs:
         print(_check(path))
@@ -330,6 +347,10 @@ def run_pipeline() -> None:
     from src.migration import run_migration
     migration = run_migration(transactions=cleaned)
 
+    # Stage 10 – Rule-based notification engine
+    from src.notifications import generate_notifications
+    plan = generate_notifications()
+
     logger.info("Pipeline complete.")
 
     # ── Print consolidated summary ───────────────────────────────────────────
@@ -350,6 +371,7 @@ def run_pipeline() -> None:
         churn_df=churn_df,
         churn_metrics=churn_metrics,
         migration=migration,
+        plan=plan,
         elapsed=time.time() - t0,
     )
 
