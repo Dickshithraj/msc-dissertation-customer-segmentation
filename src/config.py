@@ -128,3 +128,23 @@ NOTIF_CLV_LOW_Q: float = 0.40     # <  40th pct CLV = low value
 NOTIF_CADENCE_FRACTION: float = 0.6
 NOTIF_DEFAULT_CONTACT_DAYS: int = 30   # fallback for one-time buyers
 NOTIFICATION_PLAN_CSV: Path = OUTPUTS_TABLES_DIR / "notification_plan.csv"
+
+# ---------------------------------------------------------------------------
+# Monte Carlo ROI simulation (Phase 11)
+# ---------------------------------------------------------------------------
+ROI_N_SIMULATIONS: int = 10_000   # number of Monte Carlo iterations
+ROI_CI_LEVEL: float = 0.95        # central credible interval width
+# Beta concentration for the response-rate prior (higher = tighter).
+ROI_RESPONSE_CONCENTRATION: float = 150.0
+# Per-conversion revenue uncertainty (multiplier ~ Normal(1, this), clipped >0).
+ROI_REVENUE_NOISE_SD: float = 0.20
+# Financial conversion of gross order value -> profit contribution.
+ROI_GROSS_MARGIN: float = 0.30    # retail gross margin on an order
+ROI_OFFER_DISCOUNT: float = 0.10  # mean promotional discount given in offers
+# Per-contact channel costs (currency), summed across a campaign's channels.
+ROI_CHANNEL_COSTS: dict[str, float] = {
+    "Email": 0.05,
+    "App push": 0.02,
+    "SMS": 0.15,
+    "Personal outreach": 5.00,
+}

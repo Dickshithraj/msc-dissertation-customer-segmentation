@@ -69,6 +69,7 @@ def _print_pipeline_summary(
     churn_metrics: "pd.DataFrame",
     migration: dict,
     plan: "pd.DataFrame",
+    roi_summary: "pd.DataFrame",
     elapsed: float,
 ) -> None:
     """Print a structured end-of-run summary covering all stages."""
@@ -235,6 +236,19 @@ def _print_pipeline_summary(
     for pri, cnt in plan["priority"].value_counts().sort_index(ascending=False).items():
         _row(f"  Priority {pri}", f"{cnt:,}")
 
+    # ── Stage 11: Monte Carlo ROI ───────────────────────────────────────────
+    print(f"\n  STAGE 11 - Monte Carlo ROI Simulation")
+    _divider()
+    rs = roi_summary["value"]
+    _row("Simulations:", f"{int(rs['n_simulations']):,}")
+    _row("Total campaign cost:", f"{rs['total_cost']:,.0f}")
+    _row("Mean profit contribution:", f"{rs['mean_profit']:,.0f}")
+    _row("Mean ROI:", f"{rs['mean_roi']:.1f}x")
+    _row("Median ROI:", f"{rs['median_roi']:.1f}x")
+    _row("95% CI for ROI:",
+         f"[{rs['roi_ci_low_95']:.1f}x, {rs['roi_ci_high_95']:.1f}x]")
+    _row("P(ROI > 0):", f"{rs['prob_positive_roi']*100:.1f}%")
+
     # ── Files written ───────────────────────────────────────────────────────
     print(f"\n  OUTPUTS")
     _divider()
@@ -267,6 +281,8 @@ def _print_pipeline_summary(
         "outputs/tables/segment_migration_rates.csv",
         "outputs/figures/segment_migration.png",
         "outputs/tables/notification_plan.csv",
+        "outputs/tables/roi_simulation_summary.csv",
+        "outputs/figures/roi_distribution.png",
     ]
     for path in outputs:
         print(_check(path))
@@ -351,6 +367,10 @@ def run_pipeline() -> None:
     from src.notifications import generate_notifications
     plan = generate_notifications()
 
+    # Stage 11 – Monte Carlo ROI simulation
+    from src.roi import run_roi_simulation
+    roi_summary = run_roi_simulation(plan=plan, clv=clv_df)
+
     logger.info("Pipeline complete.")
 
     # ── Print consolidated summary ───────────────────────────────────────────
@@ -372,6 +392,7 @@ def run_pipeline() -> None:
         churn_metrics=churn_metrics,
         migration=migration,
         plan=plan,
+        roi_summary=roi_summary,
         elapsed=time.time() - t0,
     )
 
