@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 import pandas as pd
+from src.config import CLV_TIME_MONTHS
 from src.validation import ValidationResult
 
 # Ensure the project root is on the import path when running as a script.
@@ -63,6 +64,7 @@ def _print_pipeline_summary(
     hdbscan_sizes: dict[int, int],
     validation: ValidationResult,
     profiles: "pd.DataFrame",
+    clv_df: "pd.DataFrame",
     elapsed: float,
 ) -> None:
     """Print a structured end-of-run summary covering all stages."""
@@ -167,6 +169,20 @@ def _print_pipeline_summary(
             f"{row['Recency']:<9.0f}{row['Frequency']:<11.1f}{row['Monetary']:.0f}",
         )
 
+    # ── Stage 7: Customer Lifetime Value ────────────────────────────────────
+    print(f"\n  STAGE 7 - Customer Lifetime Value (BG/NBD + Gamma-Gamma)")
+    _divider()
+    clv = clv_df["clv"]
+    total_clv = clv.sum()
+    top_decile = clv.quantile(0.90)
+    top_share = clv[clv >= top_decile].sum() / total_clv * 100
+    _row("Forecast horizon:", f"{CLV_TIME_MONTHS} months (discounted)")
+    _row("Total portfolio CLV:", f"{total_clv:,.0f}")
+    _row("Median customer CLV:", f"{clv.median():,.0f}")
+    _row("Mean customer CLV:", f"{clv.mean():,.0f}")
+    _row("Top-decile CLV share:", f"{top_share:.1f}%  (top 10% of customers)")
+    _row("Mean P(alive):", f"{clv_df['prob_alive'].mean():.3f}")
+
     # ── Files written ───────────────────────────────────────────────────────
     print(f"\n  OUTPUTS")
     _divider()
@@ -188,6 +204,9 @@ def _print_pipeline_summary(
         "outputs/tables/segment_profiles.csv",
         "outputs/figures/segment_profiles.png",
         "outputs/figures/radar_profiles.png",
+        "data/processed/customer_clv.parquet",
+        "outputs/tables/clv_summary.csv",
+        "outputs/figures/clv_distribution.png",
     ]
     for path in outputs:
         print(_check(path))
@@ -255,13 +274,9 @@ def run_pipeline() -> None:
     best_algo = validation.best_algorithm
     profiles = profile_clusters(algo=best_algo)  # used in summary below
 
-    # Stage 5 – XGBoost cluster classifier
-    # from src.classifier import train_classifier
-    # train_classifier()
-
-    # Stage 6 – Notification rule generation
-    # from src.notifications import generate_notifications
-    # generate_notifications()
+    # Stage 7 – Customer Lifetime Value (BG/NBD + Gamma-Gamma)
+    from src.clv import build_clv
+    clv_df = build_clv(transactions=cleaned)
 
     logger.info("Pipeline complete.")
 
@@ -279,6 +294,7 @@ def run_pipeline() -> None:
         hdbscan_sizes=hdbscan_sizes,
         validation=validation,
         profiles=profiles,
+        clv_df=clv_df,
         elapsed=time.time() - t0,
     )
 

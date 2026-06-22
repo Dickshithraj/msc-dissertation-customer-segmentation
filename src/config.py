@@ -65,6 +65,9 @@ RFM_SNAPSHOT_DATE_OFFSET_DAYS: int = 1  # snapshot = max(InvoiceDate) + offset
 BGMD_PENALIZER_COEF: float = 0.001
 GAMMA_GAMMA_PENALIZER_COEF: float = 0.001
 CLV_TIME_MONTHS: int = 12               # forecast horizon in months
+CLV_FORECAST_DAYS: list[int] = [90, 180, 365]  # purchase-count forecast horizons
+CLV_DISCOUNT_RATE_MONTHLY: float = 0.01  # ~12.7% annual; for DCF in customer_lifetime_value
+CUSTOMER_CLV_PARQUET: Path = DATA_PROCESSED_DIR / "customer_clv.parquet"
 
 # ---------------------------------------------------------------------------
 # Clustering
