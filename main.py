@@ -16,7 +16,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from src.validation import ValidationResult
 
@@ -118,7 +117,6 @@ def _print_pipeline_summary(
         pct = n / sum(kmeans_sizes.values()) * 100
         _row(f"      Cluster {cid}:", f"{n:,} customers  ({pct:.1f}%)")
 
-    n_hdb_real = sum(n for c, n in hdbscan_sizes.items() if c != -1)
     n_noise = hdbscan_sizes.get(-1, 0)
     print(f"\n    HDBSCAN:")
     for cid, n in sorted(hdbscan_sizes.items()):
@@ -131,14 +129,18 @@ def _print_pipeline_summary(
     # ── Stage 3b: Validation & Stability ───────────────────────────────────
     print(f"\n  STAGE 3b - Cluster Validation & Stability")
     _divider()
-    _row("Metric", "K-Means        HDBSCAN        Better")
-    _divider()
     m = validation.metrics_df
-    for metric, better in [("silhouette", "higher"), ("davies_bouldin", "lower"),
-                           ("calinski_harabasz", "higher")]:
-        km_val = m.loc["K-Means", metric] if "K-Means" in m.index else float("nan")
-        hdb_val = m.loc["HDBSCAN", metric] if "HDBSCAN" in m.index else float("nan")
-        _row(f"  {metric}", f"{km_val:<15.4f}{hdb_val:<15.4f}({better})")
+    algos = list(m.index)
+    _row("Algorithm", "Silhouette    DB-Index   CH-Index  Noise%  Clusters")
+    _divider()
+    for algo in algos:
+        row = m.loc[algo]
+        _row(
+            f"  {algo}",
+            f"{row['silhouette']:<14.4f}{row['davies_bouldin']:<11.4f}"
+            f"{row['calinski_harabasz']:<10.1f}{row['noise_fraction']*100:<8.1f}"
+            f"{int(row['n_clusters'])}",
+        )
     _divider()
     _row("Stability (bootstrap ARI)", "Mean           Std            Stable?")
     _divider()
@@ -205,17 +207,31 @@ def run_pipeline() -> None:
     prep = preprocess_features()
 
     # ── Stage 3 ─────────────────────────────────────────────────────────────
-    from src.clustering import run_clustering
+    from src.clustering import run_all_clustering
     from src.config import OUTPUTS_TABLES_DIR as TABLES_DIR
-    cluster_df = run_clustering()
+    clustering_result = run_all_clustering()
+    cluster_df = clustering_result["cluster_df"]
     kmeans_metrics = pd.read_csv(TABLES_DIR / "kmeans_metrics.csv")
     best_k = int(cluster_df["KMeans_Cluster"].nunique())
     kmeans_sizes = cluster_df["KMeans_Cluster"].value_counts().sort_index().to_dict()
     hdbscan_sizes = cluster_df["HDBSCAN_Cluster"].value_counts().sort_index().to_dict()
 
+    # Build the labels dict for validation (all 4 algorithms)
+    label_cols = {
+        "K-Means": "KMeans_Cluster",
+        "DBSCAN":  "DBSCAN_Cluster",
+        "GMM":     "GMM_Cluster",
+        "HDBSCAN": "HDBSCAN_Cluster",
+    }
+    labels_dict = {
+        algo: cluster_df[col].values
+        for algo, col in label_cols.items()
+        if col in cluster_df.columns
+    }
+
     # Stage 3b – Cluster validation & stability
     from src.validation import run_validation
-    validation = run_validation()
+    validation = run_validation(X=prep.X_scaled, labels_dict=labels_dict)
 
     # Stage 4 – Cluster profiling & visualisation
     # from src.profiling import profile_clusters

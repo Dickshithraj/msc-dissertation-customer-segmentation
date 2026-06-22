@@ -86,6 +86,15 @@ MAX_HDBSCAN_NOISE_FRACTION: float = 0.30  # above this, HDBSCAN is penalised in 
 HDBSCAN_MIN_CLUSTER_SIZE: int = 50
 HDBSCAN_MIN_SAMPLES: int = 5
 
+# DBSCAN
+DBSCAN_MIN_SAMPLES: int = 5        # also used as k in the k-distance plot
+DBSCAN_EPS: float | None = None    # None = auto-detected from k-distance knee
+
+# Gaussian Mixture Model
+GMM_N_MIN: int = 2
+GMM_N_MAX: int = 10
+GMM_BEST_N: int | None = None      # None = auto from lowest BIC
+
 # ---------------------------------------------------------------------------
 # XGBoost cluster classifier
 # ---------------------------------------------------------------------------

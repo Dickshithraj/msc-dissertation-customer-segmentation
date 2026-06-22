@@ -96,7 +96,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
+from sklearn.cluster import DBSCAN, KMeans
+from sklearn.mixture import GaussianMixture
 from sklearn.metrics import (
     adjusted_rand_score,
     calinski_harabasz_score,
@@ -107,9 +108,11 @@ from sklearn.metrics import (
 from src.config import (
     ARI_STABILITY_THRESHOLD,
     CLUSTER_PARQUET,
+    DBSCAN_EPS,
+    DBSCAN_MIN_SAMPLES,
+    GMM_BEST_N,
     HDBSCAN_MIN_CLUSTER_SIZE,
     HDBSCAN_MIN_SAMPLES,
-    KMEANS_BEST_K,
     MAX_HDBSCAN_NOISE_FRACTION,
     N_BOOTSTRAP_ITERATIONS,
     OUTPUTS_FIGURES_DIR,
@@ -214,29 +217,26 @@ def _compute_internal_metrics(
 
 def _build_metrics_table(
     X: np.ndarray,
-    kmeans_labels: np.ndarray,
-    hdbscan_labels: np.ndarray,
+    labels_dict: dict[str, np.ndarray],
 ) -> pd.DataFrame:
-    """Assemble the internal validity comparison table.
+    """Assemble the internal validity comparison table for all algorithms.
 
     Parameters
     ----------
     X:
         Scaled feature matrix.
-    kmeans_labels:
-        Labels from the final K-Means fit.
-    hdbscan_labels:
-        Labels from the HDBSCAN fit (-1 = noise).
+    labels_dict:
+        Mapping of algorithm name to integer label array.  Algorithms with
+        noise points (label == -1) have those points excluded from metrics.
 
     Returns
     -------
     pd.DataFrame
-        One row per algorithm with all three metric values.
+        One row per algorithm with silhouette, davies_bouldin,
+        calinski_harabasz, n_clusters, and noise_fraction.
     """
-    rows = [
-        _compute_internal_metrics(X, kmeans_labels, "K-Means"),
-        _compute_internal_metrics(X, hdbscan_labels, "HDBSCAN"),
-    ]
+    rows = [_compute_internal_metrics(X, lbl, algo)
+            for algo, lbl in labels_dict.items()]
     df = pd.DataFrame(rows).set_index("Algorithm")
     logger.info("Validation metrics:\n%s", df.to_string())
     return df
@@ -246,117 +246,112 @@ def _build_metrics_table(
 # Bootstrap stability
 # ---------------------------------------------------------------------------
 
-def _bootstrap_ari_kmeans(
+def _one_bootstrap_round(
     X: np.ndarray,
-    reference_labels: np.ndarray,
-    k: int,
+    ref: np.ndarray,
+    algo: str,
+    params: dict,
     rng: np.random.Generator,
 ) -> float:
-    """One bootstrap round for K-Means.
+    """One bootstrap ARI round for any of the four supported algorithms.
 
-    Draws a bootstrap sample, fits KMeans on it, predicts labels for *all*
-    customers, and returns ARI against the reference partition.
+    Algorithms that expose a ``predict`` method (K-Means, GMM) are fitted on
+    the bootstrap subsample and then applied to the full dataset, so ARI is
+    measured against all n_customers reference labels.
 
-    K-Means exposes ``predict``, so full-dataset assignment requires no
-    approximation.  Using ``n_init=10`` (vs 50 in the main fit) keeps the
-    stability loop fast; the goal here is comparative reproducibility, not
-    finding the global optimum.
+    Algorithms without ``predict`` (DBSCAN, HDBSCAN) are fitted on the unique
+    bootstrap subsample and ARI is measured only on those in-sample indices.
+    ARI treats -1 (noise) as a valid label, so noise agreement contributes to
+    the score rather than inflating it.
 
     Parameters
     ----------
     X:
         Full scaled feature matrix.
-    reference_labels:
-        Labels from the original K-Means fit (the target to compare against).
-    k:
-        Number of clusters (same as the original fit).
+    ref:
+        Reference labels from the original fit.
+    algo:
+        One of ``"K-Means"``, ``"DBSCAN"``, ``"GMM"``, ``"HDBSCAN"``.
+    params:
+        Algorithm-specific hyper-parameters (e.g. k, n_components, eps).
     rng:
-        Seeded numpy random generator for reproducibility.
+        Seeded numpy Generator for reproducibility.
     """
     idx = rng.choice(len(X), size=len(X), replace=True)
-    unique_idx = np.unique(idx)
-    km = KMeans(n_clusters=k, init="k-means++", n_init=10, random_state=int(rng.integers(1e6)))
-    km.fit(X[unique_idx])
-    boot_labels = km.predict(X)
-    return adjusted_rand_score(reference_labels, boot_labels)
+    uid = np.unique(idx)
+    seed = int(rng.integers(1_000_000))
 
+    if algo == "K-Means":
+        k = params["k"]
+        m = KMeans(n_clusters=k, init="k-means++", n_init=10, random_state=seed)
+        m.fit(X[uid])
+        return adjusted_rand_score(ref, m.predict(X))
 
-def _bootstrap_ari_hdbscan(
-    X: np.ndarray,
-    reference_labels: np.ndarray,
-    rng: np.random.Generator,
-) -> float:
-    """One bootstrap round for HDBSCAN.
+    if algo == "GMM":
+        n = params["n"]
+        m = GaussianMixture(n_components=n, covariance_type="full",
+                            random_state=seed, n_init=3, max_iter=200)
+        m.fit(X[uid])
+        return adjusted_rand_score(ref, m.predict(X))
 
-    HDBSCAN does not support out-of-sample ``predict`` for arbitrary points,
-    so this function fits on the unique bootstrap subsample and computes ARI
-    only on those in-sample points.  ARI treats -1 (noise) as a valid label,
-    so noise agreement is included in the score.
+    if algo == "DBSCAN":
+        eps = params["eps"]
+        m = DBSCAN(eps=eps, min_samples=DBSCAN_MIN_SAMPLES, metric="euclidean")
+        boot_labels = m.fit_predict(X[uid])
+        return adjusted_rand_score(ref[uid], boot_labels)
 
-    The expected subsample size is ~63.2% of n_customers (the mean fraction of
-    distinct items in a bootstrap draw), ensuring a meaningful coverage.
+    if algo == "HDBSCAN":
+        m = hdbscan_lib.HDBSCAN(
+            min_cluster_size=HDBSCAN_MIN_CLUSTER_SIZE,
+            min_samples=HDBSCAN_MIN_SAMPLES,
+            metric="euclidean",
+            cluster_selection_method="eom",
+        )
+        boot_labels = m.fit_predict(X[uid])
+        return adjusted_rand_score(ref[uid], boot_labels)
 
-    Parameters
-    ----------
-    X:
-        Full scaled feature matrix.
-    reference_labels:
-        Labels from the original HDBSCAN fit (the target to compare against).
-    rng:
-        Seeded numpy random generator for reproducibility.
-    """
-    idx = rng.choice(len(X), size=len(X), replace=True)
-    unique_idx = np.unique(idx)
-
-    clusterer = hdbscan_lib.HDBSCAN(
-        min_cluster_size=HDBSCAN_MIN_CLUSTER_SIZE,
-        min_samples=HDBSCAN_MIN_SAMPLES,
-        metric="euclidean",
-        cluster_selection_method="eom",
-    )
-    boot_labels = clusterer.fit_predict(X[unique_idx])
-    ref_sub = reference_labels[unique_idx]
-    return adjusted_rand_score(ref_sub, boot_labels)
+    raise ValueError(f"Unknown algorithm: {algo}")
 
 
 def _run_stability_analysis(
     X: np.ndarray,
-    kmeans_labels: np.ndarray,
-    hdbscan_labels: np.ndarray,
-    k: int,
+    labels_dict: dict[str, np.ndarray],
+    algo_params: dict[str, dict],
 ) -> dict[str, list[float]]:
-    """Run N_BOOTSTRAP_ITERATIONS rounds for each algorithm, collect ARI scores.
+    """Run N_BOOTSTRAP_ITERATIONS ARI rounds for every algorithm.
 
     Parameters
     ----------
     X:
         Scaled feature matrix.
-    kmeans_labels:
-        Reference labels from the final K-Means fit.
-    hdbscan_labels:
-        Reference labels from the final HDBSCAN fit.
-    k:
-        K-Means cluster count.
+    labels_dict:
+        Reference labels keyed by algorithm name.
+    algo_params:
+        Hyper-parameters needed for refitting each algorithm in bootstrap
+        rounds (e.g. ``{"K-Means": {"k": 2}, "GMM": {"n": 3}, ...}``).
 
     Returns
     -------
     dict
-        ``{"K-Means": [ari_0, …, ari_N], "HDBSCAN": [ari_0, …, ari_N]}``
+        ``{algo: [ari_0, …, ari_N]}`` for each algorithm.
     """
     rng = np.random.default_rng(RANDOM_STATE)
-    ari_scores: dict[str, list[float]] = {"K-Means": [], "HDBSCAN": []}
+    ari_scores: dict[str, list[float]] = {a: [] for a in labels_dict}
 
-    logger.info("Bootstrap stability: %d iterations …", N_BOOTSTRAP_ITERATIONS)
+    logger.info("Bootstrap stability: %d iterations, %d algorithms.",
+                N_BOOTSTRAP_ITERATIONS, len(labels_dict))
     for i in range(N_BOOTSTRAP_ITERATIONS):
-        ari_km = _bootstrap_ari_kmeans(X, kmeans_labels, k, rng)
-        ari_hdb = _bootstrap_ari_hdbscan(X, hdbscan_labels, rng)
-        ari_scores["K-Means"].append(ari_km)
-        ari_scores["HDBSCAN"].append(ari_hdb)
+        for algo, ref in labels_dict.items():
+            ari = _one_bootstrap_round(X, ref, algo,
+                                       algo_params.get(algo, {}), rng)
+            ari_scores[algo].append(ari)
         if (i + 1) % 10 == 0:
-            logger.info(
-                "  Iteration %2d/%d | K-Means ARI=%.3f | HDBSCAN ARI=%.3f",
-                i + 1, N_BOOTSTRAP_ITERATIONS, ari_km, ari_hdb,
+            summary = "  |  ".join(
+                f"{a} ARI={np.mean(ari_scores[a]):.3f}"
+                for a in labels_dict
             )
+            logger.info("  Iter %2d/%d | %s", i + 1,
+                        N_BOOTSTRAP_ITERATIONS, summary)
 
     return ari_scores
 
@@ -399,7 +394,8 @@ def _plot_stability_boxplot(ari_scores: dict[str, list[float]]) -> None:
 
     labels = list(ari_scores.keys())
     data = [ari_scores[k] for k in labels]
-    colours = ["#4C72B0", "#DD8452"]
+    _palette = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
+    colours = _palette[: len(labels)]
 
     bp = ax.boxplot(
         data,
@@ -543,24 +539,34 @@ def select_best_algorithm(
 
 def run_validation(
     X: np.ndarray | None = None,
-    kmeans_labels: np.ndarray | None = None,
-    hdbscan_labels: np.ndarray | None = None,
+    labels_dict: dict[str, np.ndarray] | None = None,
+    algo_params: dict[str, dict] | None = None,
 ) -> ValidationResult:
-    """Run the full validation and stability suite.
+    """Run the full validation and stability suite for all four algorithms.
 
-    If no arguments are supplied, loads data from the saved parquet files
-    produced by Stages 2b and 3.
+    If ``labels_dict`` is ``None``, all four label columns are loaded from the
+    cluster parquet produced by :func:`~src.clustering.run_all_clustering`.
 
     Parameters
     ----------
     X:
         Scaled feature matrix.  Pass ``None`` to load from
         ``data/processed/scaled_features.parquet``.
-    kmeans_labels:
-        K-Means cluster labels.  Pass ``None`` to load from
+    labels_dict:
+        Mapping ``{algorithm_name: label_array}``.  Pass ``None`` to load
+        KMeans_Cluster, DBSCAN_Cluster, GMM_Cluster, and HDBSCAN_Cluster from
         ``data/processed/clustered_customers.parquet``.
-    hdbscan_labels:
-        HDBSCAN cluster labels.  Pass ``None`` to load from the same parquet.
+    algo_params:
+        Hyper-parameters for the bootstrap refitting step, e.g.::
+
+            {
+                "K-Means": {"k": 3},
+                "GMM":     {"n": 4},
+                "DBSCAN":  {"eps": 0.85},
+            }
+
+        HDBSCAN needs no extra params.  Pass ``None`` to infer k from the
+        label array; ``eps`` falls back to ``DBSCAN_EPS`` if set.
 
     Returns
     -------
@@ -573,33 +579,53 @@ def run_validation(
     * Writes ``outputs/tables/cluster_validation.csv``.
     * Writes ``outputs/figures/stability_ari.png``.
     """
-    # ── Load inputs ────────────────────────────────────────────────────────
+    # ── Load scaled features ───────────────────────────────────────────────
     if X is None:
         logger.info("Loading scaled features from %s", SCALED_FEATURES_PARQUET)
         scaled_df = pd.read_parquet(SCALED_FEATURES_PARQUET)
         X = scaled_df[FEATURE_COLS].values
 
-    if kmeans_labels is None or hdbscan_labels is None:
+    # ── Load cluster labels ────────────────────────────────────────────────
+    _col_map = {
+        "K-Means": "KMeans_Cluster",
+        "DBSCAN":  "DBSCAN_Cluster",
+        "GMM":     "GMM_Cluster",
+        "HDBSCAN": "HDBSCAN_Cluster",
+    }
+    if labels_dict is None:
         logger.info("Loading cluster labels from %s", CLUSTER_PARQUET)
         cluster_df = pd.read_parquet(CLUSTER_PARQUET)
-        kmeans_labels = cluster_df["KMeans_Cluster"].values
-        hdbscan_labels = cluster_df["HDBSCAN_Cluster"].values
+        labels_dict = {}
+        for algo, col in _col_map.items():
+            if col in cluster_df.columns:
+                labels_dict[algo] = cluster_df[col].values
+            else:
+                logger.warning("Column %s not found in cluster parquet; skipping %s.", col, algo)
 
-    k = len(np.unique(kmeans_labels))
+    # ── Build algo_params if not supplied ──────────────────────────────────
+    if algo_params is None:
+        algo_params = {}
+        if "K-Means" in labels_dict:
+            algo_params["K-Means"] = {"k": int(len(np.unique(labels_dict["K-Means"])))}
+        if "GMM" in labels_dict:
+            algo_params["GMM"] = {"n": int(len(np.unique(labels_dict["GMM"])))}
+        if "DBSCAN" in labels_dict:
+            _eps = DBSCAN_EPS if DBSCAN_EPS is not None else 0.5
+            algo_params["DBSCAN"] = {"eps": _eps}
+
     logger.info(
-        "Validating: %d customers, K-Means k=%d, HDBSCAN clusters=%d + noise.",
-        len(X), k,
-        len([c for c in np.unique(hdbscan_labels) if c != -1]),
+        "Validating %d customers across %d algorithms: %s",
+        len(X), len(labels_dict), list(labels_dict.keys()),
     )
 
     # ── Internal validity metrics ──────────────────────────────────────────
-    metrics_df = _build_metrics_table(X, kmeans_labels, hdbscan_labels)
+    metrics_df = _build_metrics_table(X, labels_dict)
     OUTPUTS_TABLES_DIR.mkdir(parents=True, exist_ok=True)
     metrics_df.to_csv(VALIDATION_CSV)
     logger.info("Validation metrics saved to %s", VALIDATION_CSV)
 
     # ── Bootstrap stability ────────────────────────────────────────────────
-    ari_scores = _run_stability_analysis(X, kmeans_labels, hdbscan_labels, k)
+    ari_scores = _run_stability_analysis(X, labels_dict, algo_params)
     stability_df = _summarise_stability(ari_scores)
     _plot_stability_boxplot(ari_scores)
 

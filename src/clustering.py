@@ -1,72 +1,61 @@
 """
-Clustering module: K-Means sweep + HDBSCAN on pre-scaled customer features.
+Clustering module: K-Means, DBSCAN, GMM, and HDBSCAN on pre-scaled features.
 
-Algorithm choice rationale
---------------------------
-Two complementary algorithms are applied and compared:
+Four algorithms are benchmarked so that the dissertation can argue for the
+chosen solution on the basis of a systematic comparison rather than a single
+arbitrary choice.  Each algorithm makes different assumptions about cluster
+geometry and density, which is documented in its function docstring.
 
 K-Means
-    Partitions all customers into exactly *k* spherical, equal-variance
-    clusters by minimising total within-cluster squared Euclidean distance.
-    It is the most widely used baseline in RFM segmentation literature, is
-    computationally efficient at n ≈ 6 000, and produces hard, mutually
-    exclusive labels that map cleanly onto distinct marketing personas.
-    The optimal k is chosen objectively using two criteria measured across a
-    sweep of k = 2 … 10:
+    Assumes spherical, equally-sized clusters.  Chosen as the standard RFM
+    baseline; interpretable centroids map directly to marketing personas.
+    Tuned via elbow (inertia) + silhouette + Davies-Bouldin sweep over k=2..10.
 
-    * **Elbow / inertia** — the rate at which adding another cluster reduces
-      total within-cluster variance.  The "elbow" marks the point of
-      diminishing returns.
-    * **Silhouette score** — measures how much closer each point is to its
-      own cluster centroid than to the nearest rival centroid (range −1 to 1;
-      higher = better separation).  Unlike the elbow, silhouette gives a
-      single scalar that can be compared objectively across k values.
-    * **Davies-Bouldin index** — ratio of within-cluster scatter to between-
-      cluster distance (lower = better).  Provides a third independent view
-      that helps resolve ties between silhouette-equivalent k values.
+DBSCAN
+    Density-based; discovers arbitrary shapes; labels outliers as noise (-1).
+    No k required, but sensitive to eps (neighbourhood radius).  eps is chosen
+    objectively from the "knee" of the sorted k-distance graph (k = min_samples).
 
-    The k with the highest silhouette score is selected automatically;
-    ``config.KMEANS_BEST_K`` can override this for manual control.
+Gaussian Mixture Model (GMM)
+    Probabilistic; assigns soft membership probabilities; allows elliptical
+    clusters.  More flexible than K-Means for non-spherical RFM distributions.
+    Number of components chosen by minimising BIC over n=2..10.
 
-HDBSCAN (Hierarchical Density-Based Spatial Clustering of Applications
-         with Noise)
-    Discovers clusters of arbitrary shape and automatically marks low-density
-    points as noise (label −1).  Unlike K-Means it does not require k to be
-    specified in advance, making it well-suited for exploratory analysis
-    where the true number of segments is unknown.  Comparing HDBSCAN output
-    to K-Means helps validate whether the K-Means partition reflects genuine
-    density structure or is an artefact of the spherical assumption.
-
-    Noise points (label −1) are retained in the output table with their
-    original label rather than being reassigned, as they often represent a
-    strategically interesting segment of infrequent, low-spend customers
-    that any targeted campaign should handle separately.
+HDBSCAN
+    Hierarchical density-based; handles variable-density clusters; labels
+    low-density points as noise.  No parameters need tuning for small n.
 
 PCA projection
 --------------
-Both sets of labels are visualised in the first two principal components of
-the scaled feature space.  The PCA is computed purely for visualisation; it
-is not used as input to either clustering algorithm.
+All four label sets are visualised in a 2x2 PCA scatter grid (PC1/PC2).
+The PCA is fitted once on the full scaled space and reused for all panels.
 """
 
 from __future__ import annotations
 
 import logging
 
-import hdbscan
+import hdbscan as hdbscan_lib
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
+from sklearn.cluster import DBSCAN, KMeans
 from sklearn.decomposition import PCA
 from sklearn.metrics import davies_bouldin_score, silhouette_score
+from sklearn.mixture import GaussianMixture
+from sklearn.neighbors import NearestNeighbors
 
 from src.config import (
     CLUSTER_PARQUET,
     CUSTOMER_FEATURES_PARQUET,
     DATA_PROCESSED_DIR,
+    DBSCAN_EPS,
+    DBSCAN_MIN_SAMPLES,
+    GMM_BEST_N,
+    GMM_N_MAX,
+    GMM_N_MIN,
     HDBSCAN_MIN_CLUSTER_SIZE,
     HDBSCAN_MIN_SAMPLES,
     KMEANS_BEST_K,
@@ -77,15 +66,17 @@ from src.config import (
     RANDOM_STATE,
     SCALED_FEATURES_PARQUET,
 )
-from src.preprocessing import FEATURE_COLS, PreprocessingResult
+from src.preprocessing import FEATURE_COLS
 
 logger = logging.getLogger(__name__)
 
-KMEANS_METRICS_CSV = OUTPUTS_TABLES_DIR / "kmeans_metrics.csv"
+KMEANS_METRICS_CSV   = OUTPUTS_TABLES_DIR / "kmeans_metrics.csv"
+GMM_BIC_CSV          = OUTPUTS_TABLES_DIR / "gmm_bic.csv"
 KMEANS_SELECTION_PNG = OUTPUTS_FIGURES_DIR / "kmeans_selection.png"
-CLUSTER_PCA_PNG = OUTPUTS_FIGURES_DIR / "cluster_pca_projection.png"
+DBSCAN_KDIST_PNG     = OUTPUTS_FIGURES_DIR / "dbscan_kdistance.png"
+GMM_BIC_PNG          = OUTPUTS_FIGURES_DIR / "gmm_bic.png"
+CLUSTER_PCA_PNG      = OUTPUTS_FIGURES_DIR / "cluster_pca_projection.png"
 
-# Palette used for cluster scatter plots (up to 12 clusters + noise).
 _CLUSTER_PALETTE = [
     "#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3",
     "#937860", "#DA8BC3", "#8C8C8C", "#CCB974", "#64B5CD",
@@ -94,116 +85,65 @@ _CLUSTER_PALETTE = [
 _NOISE_COLOUR = "#CCCCCC"
 
 
-# ---------------------------------------------------------------------------
-# K-Means sweep
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# K-Means
+# ===========================================================================
 
 def _kmeans_sweep(X: np.ndarray) -> pd.DataFrame:
     """Fit K-Means for every k in [KMEANS_K_MIN, KMEANS_K_MAX] and record metrics.
 
-    Three metrics are collected at each k so the dissertation can triangulate
-    the optimal number of clusters without relying on a single criterion:
-
-    * ``inertia`` (within-cluster sum of squares) for the elbow plot.
-    * ``silhouette`` (mean inter- vs intra-cluster distance ratio).
-    * ``davies_bouldin`` (mean ratio of scatter to separation; lower = better).
-
-    Parameters
-    ----------
-    X:
-        Scaled feature matrix of shape ``(n_customers, n_features)``.
-
-    Returns
-    -------
-    pd.DataFrame
-        One row per k with columns k, inertia, silhouette, davies_bouldin.
+    Three metrics collected per k:
+    * inertia (WCSS) — elbow plot
+    * silhouette — normalised inter/intra cluster ratio (higher = better)
+    * davies_bouldin — scatter-to-separation ratio (lower = better)
     """
     rows: list[dict] = []
-    k_range = range(KMEANS_K_MIN, KMEANS_K_MAX + 1)
-    logger.info("K-Means sweep: k = %d … %d", KMEANS_K_MIN, KMEANS_K_MAX)
-
-    for k in k_range:
+    logger.info("K-Means sweep: k = %d to %d", KMEANS_K_MIN, KMEANS_K_MAX)
+    for k in range(KMEANS_K_MIN, KMEANS_K_MAX + 1):
         km = KMeans(n_clusters=k, init="k-means++", n_init=20,
                     random_state=RANDOM_STATE)
         labels = km.fit_predict(X)
         sil = silhouette_score(X, labels, sample_size=min(3000, len(X)),
                                random_state=RANDOM_STATE)
         db = davies_bouldin_score(X, labels)
-        rows.append({
-            "k": k,
-            "inertia": round(km.inertia_, 2),
-            "silhouette": round(sil, 4),
-            "davies_bouldin": round(db, 4),
-        })
+        rows.append({"k": k, "inertia": round(km.inertia_, 2),
+                     "silhouette": round(sil, 4), "davies_bouldin": round(db, 4)})
         logger.info("  k=%2d | inertia=%10.1f | silhouette=%.4f | DB=%.4f",
                     k, km.inertia_, sil, db)
-
     return pd.DataFrame(rows)
 
 
 def _pick_best_k(metrics: pd.DataFrame) -> int:
-    """Return the k with the highest silhouette score, or the config override.
-
-    Silhouette is preferred over inertia for automatic selection because it is
-    normalised (−1 to 1) and does not merely reward adding more clusters.
-    The config constant ``KMEANS_BEST_K`` allows a researcher to override the
-    automatic choice after inspecting the elbow plot.
-
-    Parameters
-    ----------
-    metrics:
-        DataFrame produced by :func:`_kmeans_sweep`.
-    """
+    """Return k with highest silhouette, or the KMEANS_BEST_K config override."""
     if KMEANS_BEST_K is not None:
         logger.info("Using manually configured k = %d (KMEANS_BEST_K).", KMEANS_BEST_K)
         return KMEANS_BEST_K
     best = int(metrics.loc[metrics["silhouette"].idxmax(), "k"])
-    logger.info("Auto-selected k = %d (highest silhouette = %.4f).",
-                best, metrics["silhouette"].max())
+    logger.info("Auto-selected k = %d (silhouette = %.4f).", best,
+                metrics["silhouette"].max())
     return best
 
 
 def _plot_kmeans_selection(metrics: pd.DataFrame, best_k: int) -> None:
-    """Save a three-panel figure for the K-Means model-selection step.
-
-    Panels (left to right):
-    1. Elbow curve — inertia vs k.
-    2. Silhouette score vs k (higher = better).
-    3. Davies-Bouldin index vs k (lower = better).
-
-    A vertical dashed red line marks the chosen k so the figure is
-    self-documenting when included in the dissertation appendix.
-
-    Parameters
-    ----------
-    metrics:
-        DataFrame from :func:`_kmeans_sweep`.
-    best_k:
-        The chosen number of clusters (marked with a vertical line).
-    """
+    """Three-panel figure: inertia (elbow), silhouette, Davies-Bouldin vs k."""
     fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    fig.suptitle("K-Means model selection metrics", fontsize=12,
-                 fontweight="bold", y=1.01)
-
+    fig.suptitle("K-Means model selection", fontsize=12, fontweight="bold", y=1.01)
     panels = [
-        ("inertia",        "Inertia (WCSS)",         "steelblue",  False),
-        ("silhouette",     "Silhouette score",        "darkorange", True),
-        ("davies_bouldin", "Davies-Bouldin index",    "forestgreen", False),
+        ("inertia",        "Inertia (WCSS)",      "steelblue",   False),
+        ("silhouette",     "Silhouette score",     "darkorange",  True),
+        ("davies_bouldin", "Davies-Bouldin index", "forestgreen", False),
     ]
-    for ax, (col, ylabel, colour, higher_better) in zip(axes, panels):
+    for ax, (col, ylabel, colour, higher) in zip(axes, panels):
         ax.plot(metrics["k"], metrics[col], marker="o", color=colour,
                 linewidth=2, markersize=6)
         ax.axvline(best_k, color="red", linestyle="--", linewidth=1.5,
-                   label=f"k = {best_k} (chosen)")
-        ax.set_xlabel("Number of clusters (k)", fontsize=10)
-        ax.set_ylabel(ylabel, fontsize=10)
-        ax.set_title(ylabel, fontsize=10, fontweight="bold")
+                   label=f"k={best_k} chosen")
+        ax.set_xlabel("k", fontsize=10)
+        ax.set_title(f"{ylabel}\n({'higher' if higher else 'lower'} = better)",
+                     fontsize=10, fontweight="bold")
         ax.set_xticks(metrics["k"])
-        direction = "↑ better" if higher_better else "↓ better"
-        ax.set_title(f"{ylabel}\n({direction})", fontsize=10, fontweight="bold")
         ax.legend(fontsize=9)
         ax.spines[["top", "right"]].set_visible(False)
-
     plt.tight_layout()
     OUTPUTS_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     fig.savefig(KMEANS_SELECTION_PNG, dpi=150, bbox_inches="tight")
@@ -211,47 +151,108 @@ def _plot_kmeans_selection(metrics: pd.DataFrame, best_k: int) -> None:
     logger.info("K-Means selection plot saved to %s", KMEANS_SELECTION_PNG)
 
 
-def _fit_final_kmeans(X: np.ndarray, k: int) -> np.ndarray:
-    """Fit K-Means with the chosen k and return integer cluster labels.
+def _fit_final_kmeans(X: np.ndarray, k: int) -> tuple[np.ndarray, KMeans]:
+    """Fit final K-Means (n_init=50) and return (labels, fitted model)."""
+    logger.info("Fitting final K-Means with k=%d (n_init=50).", k)
+    km = KMeans(n_clusters=k, init="k-means++", n_init=50,
+                random_state=RANDOM_STATE)
+    labels = km.fit_predict(X)
+    logger.info("Final K-Means silhouette = %.4f", silhouette_score(X, labels))
+    return labels, km
 
-    Uses ``n_init=50`` for the final fit (more restarts than the sweep) to
-    reduce sensitivity to centroid initialisation, at the cost of extra
-    compute.  ``k-means++`` initialisation further reduces the risk of a
-    degenerate local minimum.
+
+# ===========================================================================
+# DBSCAN
+# ===========================================================================
+
+def _find_knee(distances: np.ndarray) -> float:
+    """Return the knee point of a sorted distance array using perpendicular distance.
+
+    The knee is found geometrically: for each point on the sorted-distance
+    curve, compute its perpendicular distance from the straight line connecting
+    the first and last points.  The index with the maximum perpendicular
+    distance is the knee — the point where the curve bends most sharply from
+    flat (core region) to steep (outlier region).
+
+    This is equivalent to the standard Kneedle algorithm (Satopaa et al., 2011)
+    without requiring an external dependency.
+
+    Parameters
+    ----------
+    distances:
+        1-D array of sorted k-th-nearest-neighbour distances.
+    """
+    n = len(distances)
+    x = np.linspace(0, 1, n)
+    y = (distances - distances.min()) / (distances.max() - distances.min() + 1e-12)
+    # Direction vector of the line from (x[0],y[0]) to (x[-1],y[-1])
+    dx, dy = x[-1] - x[0], y[-1] - y[0]
+    norm = np.sqrt(dx ** 2 + dy ** 2)
+    # Perpendicular distances from each point to the line
+    perp = np.abs(dx * (y - y[0]) - dy * (x - x[0])) / norm
+    return float(distances[np.argmax(perp)])
+
+
+def _kdistance_plot(X: np.ndarray, k: int, eps: float) -> None:
+    """Save the sorted k-distance plot used to choose DBSCAN eps.
+
+    The k-distance graph (Ester et al., 1996) plots, for each point, the
+    distance to its k-th nearest neighbour, sorted in ascending order.  The
+    point where the curve transitions sharply from flat to steep marks the
+    natural neighbourhood radius (eps).  Points beyond this threshold are
+    outliers; a cluster must contain at least ``min_samples`` core points
+    within distance eps.
 
     Parameters
     ----------
     X:
         Scaled feature matrix.
     k:
-        Number of clusters chosen by :func:`_pick_best_k`.
+        Neighbourhood size; set to ``DBSCAN_MIN_SAMPLES`` so the plot
+        directly reflects the algorithm's core-point criterion.
+    eps:
+        Auto-detected knee value, marked with a horizontal red line.
     """
-    logger.info("Fitting final K-Means with k = %d (n_init=50).", k)
-    km = KMeans(n_clusters=k, init="k-means++", n_init=50,
-                random_state=RANDOM_STATE)
-    labels = km.fit_predict(X)
-    sil = silhouette_score(X, labels)
-    logger.info("Final K-Means silhouette = %.4f", sil)
-    return labels
+    nbrs = NearestNeighbors(n_neighbors=k).fit(X)
+    dists, _ = nbrs.kneighbors(X)
+    kd = np.sort(dists[:, -1])
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(kd, color="steelblue", linewidth=1.2)
+    ax.axhline(eps, color="red", linestyle="--", linewidth=1.5,
+               label=f"Knee / eps = {eps:.3f}")
+    ax.set_xlabel("Points sorted by distance", fontsize=10)
+    ax.set_ylabel(f"{k}-th nearest neighbour distance", fontsize=10)
+    ax.set_title(f"DBSCAN k-distance plot  (k={k})\n"
+                 f"Knee detection selects eps = {eps:.3f}",
+                 fontsize=11, fontweight="bold")
+    ax.legend(fontsize=9)
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.tight_layout()
+    OUTPUTS_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(DBSCAN_KDIST_PNG, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("DBSCAN k-distance plot saved to %s", DBSCAN_KDIST_PNG)
 
 
-# ---------------------------------------------------------------------------
-# HDBSCAN
-# ---------------------------------------------------------------------------
+def _fit_dbscan(X: np.ndarray) -> tuple[np.ndarray, DBSCAN, float]:
+    """Fit DBSCAN, auto-selecting eps from the k-distance knee if not configured.
 
-def _fit_hdbscan(X: np.ndarray) -> np.ndarray:
-    """Fit HDBSCAN and return cluster labels (−1 = noise / unclustered).
+    DBSCAN (Density-Based Spatial Clustering of Applications with Noise,
+    Ester et al., 1996) groups points that are density-reachable within
+    radius eps, requiring at least min_samples core points per cluster.
 
-    ``min_cluster_size`` is the primary parameter: it sets the smallest group
-    the algorithm will consider a genuine cluster.  Set to 50 in config,
-    which means any density peak containing fewer than 50 customers is treated
-    as noise.  ``min_samples`` controls how conservative the noise labelling
-    is — higher values produce more noise points but more robust core clusters.
-
-    The noise label (−1) is **not** reassigned to the nearest cluster.
-    Noise points in HDBSCAN indicate customers who do not belong to any
-    coherent density group and are analytically meaningful in their own right
-    (often the least active or most erratic buyers).
+    Assumptions and suitability for RFM data
+    -----------------------------------------
+    * DBSCAN does not assume spherical clusters, making it appropriate for
+      the irregular shapes that emerge in RFM space where one dimension
+      (Monetary) is heavily right-skewed even after log-compression.
+    * It automatically identifies noise points (label -1), which correspond
+      to customers with unusual purchase behaviour that does not fit any
+      coherent segment.
+    * The main limitation is sensitivity to eps: a value too small produces
+      many noise points; too large merges distinct segments.  The k-distance
+      knee provides an objective, data-driven eps choice.
 
     Parameters
     ----------
@@ -260,211 +261,329 @@ def _fit_hdbscan(X: np.ndarray) -> np.ndarray:
 
     Returns
     -------
-    np.ndarray
-        Integer array of cluster labels; −1 denotes noise.
+    tuple
+        (labels, fitted DBSCAN, eps_used)
     """
-    logger.info(
-        "Fitting HDBSCAN (min_cluster_size=%d, min_samples=%d).",
-        HDBSCAN_MIN_CLUSTER_SIZE, HDBSCAN_MIN_SAMPLES,
-    )
-    clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=HDBSCAN_MIN_CLUSTER_SIZE,
-        min_samples=HDBSCAN_MIN_SAMPLES,
-        metric="euclidean",
-        cluster_selection_method="eom",  # Excess of Mass — more stable than leaf
-    )
-    labels = clusterer.fit_predict(X)
+    k = DBSCAN_MIN_SAMPLES
+    if DBSCAN_EPS is not None:
+        eps = DBSCAN_EPS
+        logger.info("Using configured DBSCAN eps = %.4f.", eps)
+    else:
+        nbrs = NearestNeighbors(n_neighbors=k).fit(X)
+        dists, _ = nbrs.kneighbors(X)
+        kd = np.sort(dists[:, -1])
+        eps = _find_knee(kd)
+        logger.info("DBSCAN auto eps from k-distance knee = %.4f.", eps)
+
+    _kdistance_plot(X, k, eps)
+
+    db = DBSCAN(eps=eps, min_samples=DBSCAN_MIN_SAMPLES, metric="euclidean")
+    labels = db.fit_predict(X)
     n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
     n_noise = int((labels == -1).sum())
-    logger.info(
-        "HDBSCAN: %d clusters found, %d noise points (%.1f%%).",
-        n_clusters, n_noise, n_noise / len(labels) * 100,
-    )
-    return labels
+    logger.info("DBSCAN: %d clusters, %d noise points (%.1f%%), eps=%.4f.",
+                n_clusters, n_noise, n_noise / len(labels) * 100, eps)
+    return labels, db, eps
 
 
-# ---------------------------------------------------------------------------
-# PCA visualisation
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Gaussian Mixture Model
+# ===========================================================================
 
-def _plot_pca_clusters(
-    X: np.ndarray,
-    kmeans_labels: np.ndarray,
-    hdbscan_labels: np.ndarray,
-) -> None:
-    """Save a side-by-side PCA scatter coloured by K-Means and HDBSCAN labels.
+def _gmm_bic_sweep(X: np.ndarray) -> pd.DataFrame:
+    """Fit GMM for n=GMM_N_MIN..GMM_N_MAX and return BIC + AIC per component count.
 
-    The PCA is fitted on the full 7-dimensional scaled space and projected
-    onto the first two principal components for visualisation only.  The
-    explained variance ratio of PC1 and PC2 is annotated on the axes so the
-    reader can assess how well the 2D projection captures the clustering
-    structure.
+    Gaussian Mixture Models (Dempster et al., 1977) represent the data as a
+    weighted sum of multivariate Gaussian distributions.  Unlike K-Means, GMM:
+    * allows elliptical cluster shapes via the full covariance matrix
+    * assigns soft probabilities (posterior responsibilities) rather than hard
+      labels, capturing uncertainty in borderline customers
+    * is penalised for complexity via BIC/AIC, providing a principled criterion
+      for choosing the number of components
 
-    Noise points (HDBSCAN label −1) are rendered in light grey and drawn
-    first so genuine cluster points appear on top.
+    BIC (Bayesian Information Criterion) is preferred over AIC here because it
+    applies a stronger penalty for model complexity, guarding against over-
+    fitting the number of segments to the training sample.  The component count
+    with the lowest BIC is selected automatically.
 
     Parameters
     ----------
     X:
-        Scaled feature matrix of shape ``(n_customers, n_features)``.
-    kmeans_labels:
-        Integer cluster labels from K-Means (0-indexed, no noise).
-    hdbscan_labels:
-        Integer cluster labels from HDBSCAN (−1 = noise).
+        Scaled feature matrix.
+    """
+    rows = []
+    logger.info("GMM BIC sweep: n = %d to %d", GMM_N_MIN, GMM_N_MAX)
+    for n in range(GMM_N_MIN, GMM_N_MAX + 1):
+        gmm = GaussianMixture(n_components=n, covariance_type="full",
+                              random_state=RANDOM_STATE, n_init=5, max_iter=300)
+        gmm.fit(X)
+        rows.append({"n": n, "bic": round(gmm.bic(X), 2),
+                     "aic": round(gmm.aic(X), 2)})
+        logger.info("  n=%2d | BIC=%10.1f | AIC=%10.1f", n, gmm.bic(X), gmm.aic(X))
+    return pd.DataFrame(rows)
+
+
+def _pick_best_n(bic_df: pd.DataFrame) -> int:
+    """Return n with lowest BIC, or GMM_BEST_N config override."""
+    if GMM_BEST_N is not None:
+        logger.info("Using manually configured GMM n = %d.", GMM_BEST_N)
+        return GMM_BEST_N
+    best = int(bic_df.loc[bic_df["bic"].idxmin(), "n"])
+    logger.info("Auto-selected GMM n = %d (BIC = %.1f).", best,
+                bic_df["bic"].min())
+    return best
+
+
+def _plot_gmm_bic(bic_df: pd.DataFrame, best_n: int) -> None:
+    """Save BIC and AIC curves vs number of GMM components."""
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(bic_df["n"], bic_df["bic"], marker="o", color="steelblue",
+            linewidth=2, label="BIC (used for selection)")
+    ax.plot(bic_df["n"], bic_df["aic"], marker="s", color="darkorange",
+            linewidth=2, linestyle="--", label="AIC")
+    ax.axvline(best_n, color="red", linestyle="--", linewidth=1.5,
+               label=f"n={best_n} chosen (min BIC)")
+    ax.set_xlabel("Number of GMM components", fontsize=10)
+    ax.set_ylabel("Information criterion (lower = better)", fontsize=10)
+    ax.set_title("GMM model selection via BIC / AIC", fontsize=11,
+                 fontweight="bold")
+    ax.set_xticks(bic_df["n"])
+    ax.legend(fontsize=9)
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.tight_layout()
+    OUTPUTS_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(GMM_BIC_PNG, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("GMM BIC plot saved to %s", GMM_BIC_PNG)
+
+
+def _fit_final_gmm(X: np.ndarray, n: int) -> tuple[np.ndarray, GaussianMixture]:
+    """Fit final GMM with chosen n and return (hard labels, fitted model).
+
+    Hard labels are the argmax of the posterior responsibility matrix so that
+    downstream profiling and validation work with integer segment IDs.  The
+    full soft probabilities are available via ``model.predict_proba(X)``.
+    """
+    logger.info("Fitting final GMM with n=%d (n_init=10).", n)
+    gmm = GaussianMixture(n_components=n, covariance_type="full",
+                          random_state=RANDOM_STATE, n_init=10, max_iter=500)
+    gmm.fit(X)
+    labels = gmm.predict(X)
+    sil = silhouette_score(X, labels, sample_size=min(3000, len(X)),
+                           random_state=RANDOM_STATE)
+    logger.info("Final GMM silhouette = %.4f.", sil)
+    return labels, gmm
+
+
+# ===========================================================================
+# HDBSCAN
+# ===========================================================================
+
+def _fit_hdbscan(X: np.ndarray) -> tuple[np.ndarray, object]:
+    """Fit HDBSCAN and return (labels, clusterer). Label -1 = noise.
+
+    HDBSCAN (Campello et al., 2013) extends DBSCAN by building a cluster
+    hierarchy and extracting stable flat clusters at the level of maximum
+    persistence.  Key advantages over DBSCAN for RFM data:
+
+    * No eps parameter — stability is assessed across all density thresholds.
+    * Handles clusters of varying density, which is common in RFM space where
+      high-value customers are sparse but form tight groups.
+    * ``cluster_selection_method="eom"`` (Excess of Mass) produces fewer,
+      more robust clusters than the leaf method.
+
+    Noise points (-1) are retained; they typically correspond to customers
+    with highly irregular purchase histories unsuitable for targeted campaigns.
+    """
+    logger.info("Fitting HDBSCAN (min_cluster_size=%d, min_samples=%d).",
+                HDBSCAN_MIN_CLUSTER_SIZE, HDBSCAN_MIN_SAMPLES)
+    clusterer = hdbscan_lib.HDBSCAN(
+        min_cluster_size=HDBSCAN_MIN_CLUSTER_SIZE,
+        min_samples=HDBSCAN_MIN_SAMPLES,
+        metric="euclidean",
+        cluster_selection_method="eom",
+    )
+    labels = clusterer.fit_predict(X)
+    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+    n_noise = int((labels == -1).sum())
+    logger.info("HDBSCAN: %d clusters, %d noise points (%.1f%%).",
+                n_clusters, n_noise, n_noise / len(labels) * 100)
+    return labels, clusterer
+
+
+# ===========================================================================
+# PCA visualisation (2x2 grid — all four algorithms)
+# ===========================================================================
+
+def _plot_pca_all(
+    X: np.ndarray,
+    all_labels: dict[str, np.ndarray],
+) -> None:
+    """Save a 2x2 PCA scatter grid showing all four algorithm partitions.
+
+    One PCA is fitted on the full scaled space and shared across all panels,
+    so differences between panels reflect genuine algorithmic variation rather
+    than projection differences.  Explained variance is annotated on the axis
+    labels.  Noise points (label -1) are drawn first in light grey so genuine
+    cluster points render on top.
+
+    Parameters
+    ----------
+    X:
+        Scaled feature matrix.
+    all_labels:
+        Dict mapping algorithm name to integer label array.
     """
     pca = PCA(n_components=2, random_state=RANDOM_STATE)
     coords = pca.fit_transform(X)
     ev = pca.explained_variance_ratio_
-    logger.info("PCA: PC1=%.1f%%, PC2=%.1f%% variance explained.",
-                ev[0] * 100, ev[1] * 100)
+    logger.info("PCA: PC1=%.1f%%, PC2=%.1f%% explained.", ev[0]*100, ev[1]*100)
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle(
-        f"Cluster assignments — PCA projection\n"
-        f"(PC1 {ev[0]*100:.1f}% + PC2 {ev[1]*100:.1f}% = "
-        f"{(ev[0]+ev[1])*100:.1f}% variance explained)",
-        fontsize=11, fontweight="bold",
+        f"All-algorithm PCA projection\n"
+        f"PC1 {ev[0]*100:.1f}% + PC2 {ev[1]*100:.1f}% = "
+        f"{(ev[0]+ev[1])*100:.1f}% variance",
+        fontsize=12, fontweight="bold",
     )
 
-    # ── Panel 1: K-Means ───────────────────────────────────────────────────
-    ax = axes[0]
-    ax.set_title(f"K-Means (k = {len(np.unique(kmeans_labels))})",
-                 fontsize=11, fontweight="bold")
-    for cid in sorted(np.unique(kmeans_labels)):
-        mask = kmeans_labels == cid
-        colour = _CLUSTER_PALETTE[cid % len(_CLUSTER_PALETTE)]
-        ax.scatter(coords[mask, 0], coords[mask, 1],
-                   c=colour, s=8, alpha=0.5, label=f"Cluster {cid} (n={mask.sum():,})")
-    ax.set_xlabel(f"PC1 ({ev[0]*100:.1f}%)", fontsize=9)
-    ax.set_ylabel(f"PC2 ({ev[1]*100:.1f}%)", fontsize=9)
-    ax.legend(fontsize=8, markerscale=2, framealpha=0.7)
-    ax.spines[["top", "right"]].set_visible(False)
+    for ax, (algo, labels) in zip(axes.flat, all_labels.items()):
+        unique = sorted(np.unique(labels))
+        n_real = len([c for c in unique if c != -1])
+        ax.set_title(f"{algo}  ({n_real} clusters)", fontsize=11,
+                     fontweight="bold")
 
-    # ── Panel 2: HDBSCAN ──────────────────────────────────────────────────
-    ax = axes[1]
-    unique_hdb = sorted(np.unique(hdbscan_labels))
-    n_real = len([c for c in unique_hdb if c != -1])
-    ax.set_title(f"HDBSCAN ({n_real} clusters)", fontsize=11, fontweight="bold")
+        if -1 in unique:
+            mask = labels == -1
+            ax.scatter(coords[mask, 0], coords[mask, 1], c=_NOISE_COLOUR,
+                       s=6, alpha=0.3, label=f"Noise (n={mask.sum():,})")
 
-    # Draw noise first so cluster points render on top.
-    if -1 in unique_hdb:
-        mask = hdbscan_labels == -1
-        ax.scatter(coords[mask, 0], coords[mask, 1],
-                   c=_NOISE_COLOUR, s=6, alpha=0.3, label=f"Noise (n={mask.sum():,})")
+        cidx = 0
+        for cid in unique:
+            if cid == -1:
+                continue
+            mask = labels == cid
+            colour = _CLUSTER_PALETTE[cidx % len(_CLUSTER_PALETTE)]
+            ax.scatter(coords[mask, 0], coords[mask, 1], c=colour,
+                       s=8, alpha=0.5, label=f"C{cid} (n={mask.sum():,})")
+            cidx += 1
 
-    colour_idx = 0
-    for cid in unique_hdb:
-        if cid == -1:
-            continue
-        mask = hdbscan_labels == cid
-        colour = _CLUSTER_PALETTE[colour_idx % len(_CLUSTER_PALETTE)]
-        ax.scatter(coords[mask, 0], coords[mask, 1],
-                   c=colour, s=8, alpha=0.5, label=f"Cluster {cid} (n={mask.sum():,})")
-        colour_idx += 1
-
-    ax.set_xlabel(f"PC1 ({ev[0]*100:.1f}%)", fontsize=9)
-    ax.set_ylabel(f"PC2 ({ev[1]*100:.1f}%)", fontsize=9)
-    ax.legend(fontsize=8, markerscale=2, framealpha=0.7)
-    ax.spines[["top", "right"]].set_visible(False)
+        ax.set_xlabel(f"PC1 ({ev[0]*100:.1f}%)", fontsize=9)
+        ax.set_ylabel(f"PC2 ({ev[1]*100:.1f}%)", fontsize=9)
+        ax.legend(fontsize=7, markerscale=2, framealpha=0.6)
+        ax.spines[["top", "right"]].set_visible(False)
 
     plt.tight_layout()
     OUTPUTS_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     fig.savefig(CLUSTER_PCA_PNG, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    logger.info("PCA cluster projection saved to %s", CLUSTER_PCA_PNG)
+    logger.info("PCA 2x2 projection saved to %s", CLUSTER_PCA_PNG)
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Public API
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
-def run_clustering(
-    preprocessing_result: PreprocessingResult | None = None,
-) -> pd.DataFrame:
-    """Run K-Means sweep + HDBSCAN and save cluster assignments.
+def run_all_clustering(X: np.ndarray | None = None) -> dict:
+    """Run K-Means, DBSCAN, GMM, and HDBSCAN and save all results.
 
-    If ``preprocessing_result`` is not supplied the function loads the
-    pre-computed scaled features from ``data/processed/scaled_features.parquet``
-    so Stage 3 can be called independently of Stage 2b.
+    Loads scaled features from ``data/processed/scaled_features.parquet`` if
+    ``X`` is not supplied.  All four label arrays are merged with the raw
+    customer features and saved to ``data/processed/clustered_customers.parquet``.
 
     Parameters
     ----------
-    preprocessing_result:
-        Optional output of :func:`src.preprocessing.preprocess_features`.
-        When provided, the scaler and ``log1p_cols`` are available for
-        later inverse-transforming centroids.  Pass ``None`` to load from
-        the saved parquet.
+    X:
+        Optional pre-loaded scaled feature matrix.
 
     Returns
     -------
-    pd.DataFrame
-        Customer-level cluster assignment table with columns:
-
-        * ``Customer ID``
-        * ``KMeans_Cluster``  — integer 0 … k−1
-        * ``HDBSCAN_Cluster`` — integer ≥ 0, or −1 for noise
-
-        Saved to ``data/processed/clustered_customers.parquet``.
+    dict
+        Keys: ``"kmeans"``, ``"dbscan"``, ``"gmm"``, ``"hdbscan"``.
+        Each value is a dict with ``"labels"`` (np.ndarray) and ``"model"``.
+        Also includes ``"customer_ids"`` and ``"cluster_df"``.
 
     Side effects
     ------------
-    * Writes ``outputs/tables/kmeans_metrics.csv``
-    * Writes ``outputs/figures/kmeans_selection.png``
-    * Writes ``outputs/figures/cluster_pca_projection.png``
-    * Writes ``data/processed/clustered_customers.parquet``
+    * ``outputs/tables/kmeans_metrics.csv``
+    * ``outputs/tables/gmm_bic.csv``
+    * ``outputs/figures/kmeans_selection.png``
+    * ``outputs/figures/dbscan_kdistance.png``
+    * ``outputs/figures/gmm_bic.png``
+    * ``outputs/figures/cluster_pca_projection.png``
+    * ``data/processed/clustered_customers.parquet``
     """
     # ── Load data ──────────────────────────────────────────────────────────
-    if preprocessing_result is not None:
-        X = preprocessing_result.X_scaled
-        scaled_df = pd.read_parquet(SCALED_FEATURES_PARQUET)
-        customer_ids = scaled_df["Customer ID"].values
-    else:
-        logger.info("Loading scaled features from %s", SCALED_FEATURES_PARQUET)
-        scaled_df = pd.read_parquet(SCALED_FEATURES_PARQUET)
-        customer_ids = scaled_df["Customer ID"].values
+    logger.info("Loading scaled features from %s", SCALED_FEATURES_PARQUET)
+    scaled_df = pd.read_parquet(SCALED_FEATURES_PARQUET)
+    customer_ids = scaled_df["Customer ID"].values
+    if X is None:
         X = scaled_df[FEATURE_COLS].values
-
     logger.info("Clustering %d customers on %d features.", *X.shape)
 
-    # ── K-Means sweep ──────────────────────────────────────────────────────
-    metrics = _kmeans_sweep(X)
     OUTPUTS_TABLES_DIR.mkdir(parents=True, exist_ok=True)
-    metrics.to_csv(KMEANS_METRICS_CSV, index=False)
-    logger.info("K-Means metrics saved to %s", KMEANS_METRICS_CSV)
 
-    best_k = _pick_best_k(metrics)
-    _plot_kmeans_selection(metrics, best_k)
+    # ── K-Means ────────────────────────────────────────────────────────────
+    km_metrics = _kmeans_sweep(X)
+    km_metrics.to_csv(KMEANS_METRICS_CSV, index=False)
+    best_k = _pick_best_k(km_metrics)
+    _plot_kmeans_selection(km_metrics, best_k)
+    km_labels, km_model = _fit_final_kmeans(X, best_k)
 
-    kmeans_labels = _fit_final_kmeans(X, best_k)
+    # ── DBSCAN ────────────────────────────────────────────────────────────
+    db_labels, db_model, db_eps = _fit_dbscan(X)
 
-    # ── HDBSCAN ────────────────────────────────────────────────────────────
-    hdbscan_labels = _fit_hdbscan(X)
+    # ── GMM ───────────────────────────────────────────────────────────────
+    bic_df = _gmm_bic_sweep(X)
+    bic_df.to_csv(GMM_BIC_CSV, index=False)
+    best_n = _pick_best_n(bic_df)
+    _plot_gmm_bic(bic_df, best_n)
+    gmm_labels, gmm_model = _fit_final_gmm(X, best_n)
 
-    # ── PCA visualisation ──────────────────────────────────────────────────
-    _plot_pca_clusters(X, kmeans_labels, hdbscan_labels)
+    # ── HDBSCAN ───────────────────────────────────────────────────────────
+    hdb_labels, hdb_model = _fit_hdbscan(X)
+
+    # ── PCA (2x2) ─────────────────────────────────────────────────────────
+    all_labels = {
+        "K-Means":  km_labels,
+        "DBSCAN":   db_labels,
+        "GMM":      gmm_labels,
+        "HDBSCAN":  hdb_labels,
+    }
+    _plot_pca_all(X, all_labels)
 
     # ── Persist cluster assignments ────────────────────────────────────────
     cluster_df = pd.DataFrame({
-        "Customer ID": customer_ids,
-        "KMeans_Cluster": kmeans_labels,
-        "HDBSCAN_Cluster": hdbscan_labels,
+        "Customer ID":    customer_ids,
+        "KMeans_Cluster": km_labels,
+        "DBSCAN_Cluster": db_labels,
+        "GMM_Cluster":    gmm_labels,
+        "HDBSCAN_Cluster": hdb_labels,
     })
-
-    # Merge in raw features so the table is self-contained for profiling.
     features_df = pd.read_parquet(CUSTOMER_FEATURES_PARQUET)
     cluster_df = cluster_df.merge(features_df, on="Customer ID", how="left")
-
     DATA_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     cluster_df.to_parquet(CLUSTER_PARQUET, index=False)
     logger.info("Cluster assignments saved to %s", CLUSTER_PARQUET)
 
     # ── Summary log ────────────────────────────────────────────────────────
-    logger.info("\nK-Means cluster sizes:")
-    for cid, count in pd.Series(kmeans_labels).value_counts().sort_index().items():
-        logger.info("  Cluster %d: %d customers", cid, count)
+    for algo, lbl in all_labels.items():
+        sizes = pd.Series(lbl).value_counts().sort_index()
+        parts = [f"C{c}:{n}" for c, n in sizes.items()]
+        logger.info("%s: %s", algo, "  ".join(parts))
 
-    logger.info("\nHDBSCAN cluster sizes (incl. noise = −1):")
-    for cid, count in pd.Series(hdbscan_labels).value_counts().sort_index().items():
-        logger.info("  Cluster %d: %d customers", cid, count)
+    return {
+        "kmeans":       {"labels": km_labels,  "model": km_model},
+        "dbscan":       {"labels": db_labels,  "model": db_model, "eps": db_eps},
+        "gmm":          {"labels": gmm_labels, "model": gmm_model},
+        "hdbscan":      {"labels": hdb_labels, "model": hdb_model},
+        "customer_ids": customer_ids,
+        "cluster_df":   cluster_df,
+    }
 
-    return cluster_df
+
+# Backward-compatible alias kept so any cached imports still work.
+def run_clustering(*args, **kwargs) -> pd.DataFrame:
+    """Alias for run_all_clustering(); returns cluster_df for compatibility."""
+    result = run_all_clustering(*args, **kwargs)
+    return result["cluster_df"]
