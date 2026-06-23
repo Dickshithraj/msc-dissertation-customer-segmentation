@@ -37,6 +37,24 @@ def _code(src: str):
     return new_code_cell(src)
 
 
+def _src(*rels: str):
+    """Return a markdown cell embedding the full source of one or more files.
+
+    The code is shown in a syntax-highlighted (non-executed) block so the
+    notebook contains the complete implementation, not just the function calls.
+    """
+    blocks = []
+    for rel in rels:
+        path = PROJECT_ROOT / rel
+        code = path.read_text(encoding="utf-8", errors="replace")
+        n_lines = code.count("\n") + 1
+        blocks.append(
+            f"**Implementation — `{rel}`** ({n_lines} lines)\n\n"
+            f"```python\n{code}\n```"
+        )
+    return _md("\n\n".join(blocks))
+
+
 def build_cells() -> list:
     cells = []
 
@@ -113,6 +131,13 @@ def build_cells() -> list:
         "pd.set_option('display.width', 160)\n"
         "print('Setup complete. Working directory:', os.getcwd())"
     ))
+    cells.append(_md(
+        "### Central configuration\n\n"
+        "All file paths, hyper-parameters, and tunable thresholds are centralised "
+        "in `src/config.py` so that no magic numbers appear inside the pipeline "
+        "modules. The full configuration is shown below."
+    ))
+    cells.append(_src("src/config.py"))
 
     # ── Stage 1 ───────────────────────────────────────────────────────────────
     cells.append(_md(
@@ -131,6 +156,7 @@ def build_cells() -> list:
         "The cleaning is executed once by `main.py`; here we load the cleaned "
         "artefact and display the audit table it produced."
     ))
+    cells.append(_src("src/data_loading.py", "src/cleaning.py"))
     cells.append(_code(
         "cleaned = pd.read_parquet('data/processed/cleaned_transactions.parquet')\n"
         "summary = pd.read_csv('outputs/tables/cleaning_summary.csv')\n"
@@ -160,6 +186,7 @@ def build_cells() -> list:
         "The snapshot date is fixed at `max(InvoiceDate) + 1 day` rather than the "
         "current date, guaranteeing identical Recency values on every run."
     ))
+    cells.append(_src("src/features.py"))
     cells.append(_code(
         "from src.features import build_customer_features\n"
         "features = build_customer_features()\n"
@@ -190,6 +217,7 @@ def build_cells() -> list:
         "list of log-transformed columns are retained so cluster centroids can later "
         "be returned to their original, interpretable scale."
     ))
+    cells.append(_src("src/preprocessing.py"))
     cells.append(_code(
         "from src.preprocessing import preprocess_features\n"
         "prep = preprocess_features()\n"
@@ -219,6 +247,7 @@ def build_cells() -> list:
         "noise). Principal Component Analysis is used only for 2-D visualisation, "
         "never as a clustering input."
     ))
+    cells.append(_src("src/clustering.py"))
     cells.append(_code(
         "from src.clustering import run_all_clustering\n"
         "clustering = run_all_clustering()\n"
@@ -251,6 +280,7 @@ def build_cells() -> list:
         "rule disqualifies excessively noisy solutions, requires mean ARI ≥ 0.70, "
         "and finally chooses the highest silhouette."
     ))
+    cells.append(_src("src/validation.py"))
     cells.append(_code(
         "from src.validation import run_validation\n"
         "validation = run_validation(X=prep.X_scaled)\n"
@@ -282,6 +312,7 @@ def build_cells() -> list:
         "transparent rule set expressed as multiples of the overall customer mean. "
         "Results are visualised as a z-score heatmap and a min-max radar chart."
     ))
+    cells.append(_src("src/profiling.py"))
     cells.append(_code(
         "from src.profiling import profile_clusters\n"
         "profiles = profile_clusters(algo=validation.best_algorithm)\n"
@@ -312,6 +343,7 @@ def build_cells() -> list:
         "product, discounted over a 12-month horizon, yields each customer's CLV; "
         "90/180/365-day purchase forecasts are also produced."
     ))
+    cells.append(_src("src/clv.py"))
     cells.append(_code(
         "from src.clv import build_clv\n"
         "clv_df = build_clv(transactions=cleaned)\n"
@@ -348,6 +380,7 @@ def build_cells() -> list:
         "near-perfect score. The models therefore learn churn from purely "
         "behavioural signals."
     ))
+    cells.append(_src("src/churn.py"))
     cells.append(_code(
         "from src.churn import run_churn\n"
         "churn_df = run_churn(features=features)\n"
@@ -378,6 +411,7 @@ def build_cells() -> list:
         "as row-normalised probabilities, alongside the sizes of the retained, "
         "lapsed, and newly-acquired cohorts."
     ))
+    cells.append(_src("src/migration.py"))
     cells.append(_code(
         "from src.migration import run_migration\n"
         "migration = run_migration(transactions=cleaned)\n"
@@ -410,6 +444,7 @@ def build_cells() -> list:
         "customers, while low-value churners receive only a low-cost automated "
         "nudge. The engine exposes `recommend(customer_id)` for single lookups."
     ))
+    cells.append(_src("src/notifications.py"))
     cells.append(_code(
         "from src.notifications import generate_notifications, recommend\n"
         "plan = generate_notifications()\n"
@@ -442,6 +477,7 @@ def build_cells() -> list:
         "value is profit. The output is a *distribution* of ROI with a 95% credible "
         "interval."
     ))
+    cells.append(_src("src/roi.py"))
     cells.append(_code(
         "from src.roi import run_roi_simulation\n"
         "roi_summary = run_roi_simulation(plan=plan, clv=clv_df)\n"
@@ -456,6 +492,29 @@ def build_cells() -> list:
         "channels mirrors the widely-cited ~36:1 email-marketing benchmark. The "
         "credible interval, rather than a single number, communicates the residual "
         "uncertainty honestly."
+    ))
+
+    # ── Appendix: orchestrator + tests ────────────────────────────────────────
+    cells.append(_md(
+        "---\n"
+        "## Appendix A — Pipeline Orchestrator (`main.py`)\n\n"
+        "`main.py` runs every stage in sequence and prints the consolidated "
+        "stage-by-stage summary. It is the single entry point for reproducing the "
+        "entire study (`python main.py`)."
+    ))
+    cells.append(_src("main.py"))
+    cells.append(_md(
+        "## Appendix B — Test Suite (`tests/`)\n\n"
+        "The pytest suite validates the core logic on small synthetic datasets "
+        "(no raw data required), including the cleaning rules, the exact RFM "
+        "derivations, the churn target-leakage guard, the notification decision "
+        "logic, and the ROI simulator. All 20 tests pass in a few seconds."
+    ))
+    cells.append(_src(
+        "tests/conftest.py", "tests/test_cleaning.py", "tests/test_features.py",
+        "tests/test_preprocessing.py", "tests/test_churn.py",
+        "tests/test_notifications.py", "tests/test_roi.py",
+        "tests/test_migration.py",
     ))
 
     # ── Conclusion ────────────────────────────────────────────────────────────
