@@ -7,21 +7,19 @@ to the user's Downloads folder.
 
 Run from the project root::
 
-    python generate_report.py
+    python scripts/generate_report.py
 """
 
 from __future__ import annotations
 
 import base64
 import html
-import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent  # repo root (scripts/ is one level down)
 DOWNLOADS = Path.home() / "Downloads"
 OUT_HTML = DOWNLOADS / "dissertation_report.html"
 

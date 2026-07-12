@@ -68,6 +68,9 @@ CLV_TIME_MONTHS: int = 12               # forecast horizon in months
 CLV_FORECAST_DAYS: list[int] = [90, 180, 365]  # purchase-count forecast horizons
 CLV_DISCOUNT_RATE_MONTHLY: float = 0.01  # ~12.7% annual; for DCF in customer_lifetime_value
 CUSTOMER_CLV_PARQUET: Path = DATA_PROCESSED_DIR / "customer_clv.parquet"
+# Temporal validation: length of the holdout window carved off the end of the
+# transaction history; the BG/NBD model is refitted on the remainder only.
+CLV_HOLDOUT_DAYS: int = 365
 
 # ---------------------------------------------------------------------------
 # Clustering
@@ -98,6 +101,13 @@ GMM_N_MIN: int = 2
 GMM_N_MAX: int = 10
 GMM_BEST_N: int | None = None      # None = auto from lowest BIC
 
+# Agglomerative (hierarchical, Ward) and Spectral clustering.
+# Both reuse the K-Means-selected k for a like-for-like, same-cluster-count
+# comparison against the centroid / density / probabilistic families.
+AGGLOMERATIVE_LINKAGE: str = "ward"
+SPECTRAL_AFFINITY: str = "nearest_neighbors"  # sparse graph -> tractable at n~6k
+SPECTRAL_N_NEIGHBORS: int = 10
+
 # ---------------------------------------------------------------------------
 # XGBoost cluster classifier
 # ---------------------------------------------------------------------------
@@ -118,6 +128,12 @@ CUSTOMER_CHURN_PARQUET: Path = DATA_PROCESSED_DIR / "customer_churn.parquet"
 # ---------------------------------------------------------------------------
 # Notification / marketing rules (Phase 10)
 # ---------------------------------------------------------------------------
+# Which unsupervised clustering result drives the notification segments.
+# Each customer is assigned the marketing segment of *their cluster* (named from
+# the cluster's mean RFM profile), so the campaign engine is genuinely
+# cluster-based rather than a parallel per-customer rule pass.
+# One of: "HDBSCAN", "K-Means", "GMM", "DBSCAN".
+NOTIF_CLUSTER_ALGO: str = "HDBSCAN"
 # Churn-probability bands used to escalate / de-prioritise campaigns.
 NOTIF_CHURN_HIGH: float = 0.50    # >= this churn prob = high risk
 NOTIF_CHURN_MED: float = 0.25     # >= this (and < HIGH) = medium risk
@@ -136,6 +152,12 @@ ROI_N_SIMULATIONS: int = 10_000   # number of Monte Carlo iterations
 ROI_CI_LEVEL: float = 0.95        # central credible interval width
 # Beta concentration for the response-rate prior (higher = tighter).
 ROI_RESPONSE_CONCENTRATION: float = 150.0
+# Static-baseline ("blanket marketing") campaign used to quantify the uplift of
+# targeted, cluster-based notifications over untargeted demographic-style
+# marketing: every customer is contacted once on one channel with one generic
+# offer at a low blanket response rate.
+ROI_STATIC_RESPONSE: float = 0.02    # blanket response rate (untargeted)
+ROI_STATIC_CHANNEL: str = "Email"    # single channel used for the blanket send
 # Per-conversion revenue uncertainty (multiplier ~ Normal(1, this), clipped >0).
 ROI_REVENUE_NOISE_SD: float = 0.20
 # Financial conversion of gross order value -> profit contribution.

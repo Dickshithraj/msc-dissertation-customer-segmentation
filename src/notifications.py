@@ -4,7 +4,9 @@ Phase 10: Rule-based marketing notification engine.
 Turns the analytical outputs of earlier stages into a concrete, per-customer
 marketing action plan.  Each customer is assigned:
 
-- a **segment** (rule-based RFM name, consistent with profiling/migration),
+- a **segment** — the marketing name of the **unsupervised cluster** they were
+  assigned in Stage 3 (``NOTIF_CLUSTER_ALGO``, default HDBSCAN), so the campaign
+  engine is driven by the clustering result, not a separate rule pass,
 - a **value tier** (High / Medium / Low) from their predicted CLV,
 - a **churn-risk band** (High / Medium / Low) from their churn probability,
 
@@ -34,6 +36,16 @@ the customer's own average inter-purchase gap, so the message lands *before*
 they would naturally lapse.  One-time buyers (no cadence) fall back to
 ``NOTIF_DEFAULT_CONTACT_DAYS``.
 
+Delivery model
+--------------
+This is a **logic-based automation framework**, not a real-time streaming
+system: :func:`generate_notifications` builds the full plan as a batch, and
+:func:`recommend` exposes the same logic for **on-demand** single-customer
+look-ups (e.g. behind an API endpoint).  Because the rules are deterministic,
+the per-customer recommendation can be (re)computed the moment a customer's
+CLV / churn / cluster inputs change, which is what makes the engine "dynamic"
+without requiring a live event pipeline.
+
 Outputs
 -------
 outputs/tables/notification_plan.csv -- one row per customer with the full plan
@@ -46,18 +58,25 @@ import logging
 import pandas as pd
 
 from src.config import (
+    CLUSTER_PARQUET,
     CUSTOMER_CHURN_PARQUET,
     CUSTOMER_CLV_PARQUET,
     NOTIF_CADENCE_FRACTION,
     NOTIF_CHURN_HIGH,
     NOTIF_CHURN_MED,
+    NOTIF_CLUSTER_ALGO,
     NOTIF_CLV_HIGH_Q,
     NOTIF_CLV_LOW_Q,
     NOTIF_DEFAULT_CONTACT_DAYS,
     NOTIFICATION_PLAN_CSV,
     OUTPUTS_TABLES_DIR,
 )
-from src.profiling import _assign_name
+from src.profiling import (
+    FEATURE_COLS,
+    _LABEL_COL,
+    _build_profiles,
+    _name_clusters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,30 +133,57 @@ _SEGMENT_PLAYBOOK: dict[str, dict] = {
     },
 }
 
-_RFM_COLS = ["Recency", "Frequency", "Monetary"]
-
-
 # ---------------------------------------------------------------------------
 # Data assembly
 # ---------------------------------------------------------------------------
 
+def _cluster_segment_names(clusters: pd.DataFrame, label_col: str) -> dict[int, str]:
+    """Map each cluster id to a marketing segment name from its mean RFM profile.
+
+    Reuses the same rule-based namer used to label clusters in profiling, so a
+    cluster whose averaged behaviour looks like "Champions" drives the Champions
+    playbook.  Cluster -1 (HDBSCAN/DBSCAN noise) becomes "Noise / Uncategorised".
+    """
+    profiles = _build_profiles(clusters, label_col)
+    overall = clusters[FEATURE_COLS].mean()
+    return _name_clusters(profiles, overall)
+
+
 def _load_customer_table() -> pd.DataFrame:
-    """Merge CLV and churn artefacts into one per-customer table.
+    """Merge CLV, churn, and unsupervised cluster labels into one table.
 
     The CLV parquet already carries the full feature set (it was built by
-    merging onto customer_features), so it is the base; churn scores are
-    joined on Customer ID.
+    merging onto customer_features), so it is the base; churn scores and the
+    cluster label from the configured clustering algorithm (``NOTIF_CLUSTER_ALGO``)
+    are joined on Customer ID.  Each customer's marketing ``segment`` is the name
+    of *their cluster* (derived from the cluster's mean RFM profile), so the
+    campaign engine is driven by the clustering result rather than a separate
+    per-customer rule pass.
     """
     logger.info("Loading CLV table from %s", CUSTOMER_CLV_PARQUET)
     clv = pd.read_parquet(CUSTOMER_CLV_PARQUET)
     logger.info("Loading churn table from %s", CUSTOMER_CHURN_PARQUET)
     churn = pd.read_parquet(CUSTOMER_CHURN_PARQUET)
+    logger.info("Loading %s cluster labels from %s", NOTIF_CLUSTER_ALGO, CLUSTER_PARQUET)
+    clusters = pd.read_parquet(CLUSTER_PARQUET)
 
     df = clv.merge(
         churn[["Customer ID", "churn_label", "churn_probability"]],
         on="Customer ID", how="left",
     )
-    logger.info("Merged customer table: %d rows, %d columns.", len(df), df.shape[1])
+
+    # Attach each customer's cluster label and its cluster-derived segment name.
+    label_col = _LABEL_COL[NOTIF_CLUSTER_ALGO]
+    cluster_names = _cluster_segment_names(clusters, label_col)
+    df = df.merge(clusters[["Customer ID", label_col]], on="Customer ID", how="left")
+    df["cluster"] = df[label_col]
+    df["segment"] = df["cluster"].map(cluster_names).fillna("Noise / Uncategorised")
+    df = df.drop(columns=[label_col])
+
+    logger.info(
+        "Merged customer table: %d rows. Segments (from %s clusters):\n%s",
+        len(df), NOTIF_CLUSTER_ALGO, df["segment"].value_counts().to_string(),
+    )
     return df
 
 
@@ -146,11 +192,13 @@ def _load_customer_table() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def _assign_tiers(df: pd.DataFrame) -> pd.DataFrame:
-    """Add segment, clv_tier, and churn_risk columns in place (returns copy)."""
-    out = df.copy()
+    """Add clv_tier and churn_risk columns (returns copy).
 
-    overall = out[_RFM_COLS].mean()
-    out["segment"] = out.apply(lambda r: _assign_name(r, overall), axis=1)
+    The ``segment`` column is already set in :func:`_load_customer_table` from
+    the customer's cluster, so this step only adds the value and churn-risk
+    bands that modulate each segment's baseline campaign.
+    """
+    out = df.copy()
 
     clv_high = out["clv"].quantile(NOTIF_CLV_HIGH_Q)
     clv_low = out["clv"].quantile(NOTIF_CLV_LOW_Q)
@@ -317,7 +365,7 @@ def recommend(customer_id: int, refresh: bool = False) -> dict:
     KeyError
         If the customer ID is not present in the plan.
     """
-    global _PLAN_CACHE
+    # Read-only access to the module cache; no `global` needed here.
     if _PLAN_CACHE is None or refresh:
         generate_notifications()
 

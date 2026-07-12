@@ -9,7 +9,7 @@ the user's Downloads folder.
 
 Run from the project root::
 
-    python build_notebook.py
+    python scripts/build_notebook.py
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import nbformat
 from nbconvert.preprocessors import ExecutePreprocessor
 from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent  # repo root (scripts/ is one level down)
 DOWNLOADS = Path.home() / "Downloads"
 LOCAL_IPYNB = PROJECT_ROOT / "Dissertation_Pipeline.ipynb"
 DOWNLOAD_IPYNB = DOWNLOADS / "Dissertation_Pipeline.ipynb"

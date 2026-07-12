@@ -248,6 +248,12 @@ def _print_pipeline_summary(
     _row("95% CI for ROI:",
          f"[{rs['roi_ci_low_95']:.1f}x, {rs['roi_ci_high_95']:.1f}x]")
     _row("P(ROI > 0):", f"{rs['prob_positive_roi']*100:.1f}%")
+    if "roi_uplift_vs_static" in rs.index:
+        _divider()
+        _row("Static blanket-campaign ROI:", f"{rs['static_mean_roi']:.1f}x")
+        _row("ROI uplift vs static:", f"+{rs['roi_uplift_vs_static']:.1f}x")
+        _row("Profit uplift vs static:",
+             f"+{rs['profit_uplift_vs_static']:,.0f}  (+{rs['profit_uplift_pct_vs_static']:.0f}%)")
 
     # ── Files written ───────────────────────────────────────────────────────
     print(f"\n  OUTPUTS")
@@ -266,6 +272,7 @@ def _print_pipeline_summary(
         "outputs/figures/kmeans_selection.png",
         "outputs/figures/cluster_pca_projection.png",
         "outputs/tables/cluster_validation.csv",
+        "outputs/tables/cluster_ranking.csv",
         "outputs/figures/stability_ari.png",
         "outputs/tables/segment_profiles.csv",
         "outputs/figures/segment_profiles.png",
@@ -275,7 +282,10 @@ def _print_pipeline_summary(
         "outputs/figures/clv_distribution.png",
         "data/processed/customer_churn.parquet",
         "outputs/tables/churn_model_comparison.csv",
+        "outputs/tables/churn_mcnemar_pvalues.csv",
+        "outputs/tables/churn_model_ranking.csv",
         "outputs/figures/churn_roc_curves.png",
+        "outputs/figures/churn_pr_curves.png",
         "outputs/figures/churn_feature_importance.png",
         "outputs/tables/segment_migration_counts.csv",
         "outputs/tables/segment_migration_rates.csv",
@@ -328,12 +338,14 @@ def run_pipeline() -> None:
     kmeans_sizes = cluster_df["KMeans_Cluster"].value_counts().sort_index().to_dict()
     hdbscan_sizes = cluster_df["HDBSCAN_Cluster"].value_counts().sort_index().to_dict()
 
-    # Build the labels dict for validation (all 4 algorithms)
+    # Build the labels dict for validation (all 6 algorithms)
     label_cols = {
         "K-Means": "KMeans_Cluster",
         "DBSCAN":  "DBSCAN_Cluster",
         "GMM":     "GMM_Cluster",
         "HDBSCAN": "HDBSCAN_Cluster",
+        "Agglomerative": "Agglomerative_Cluster",
+        "Spectral":      "Spectral_Cluster",
     }
     labels_dict = {
         algo: cluster_df[col].values

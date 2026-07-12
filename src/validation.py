@@ -96,7 +96,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.cluster import DBSCAN, KMeans
+from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans, SpectralClustering
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -106,11 +106,11 @@ from sklearn.metrics import (
 )
 
 from src.config import (
+    AGGLOMERATIVE_LINKAGE,
     ARI_STABILITY_THRESHOLD,
     CLUSTER_PARQUET,
     DBSCAN_EPS,
     DBSCAN_MIN_SAMPLES,
-    GMM_BEST_N,
     HDBSCAN_MIN_CLUSTER_SIZE,
     HDBSCAN_MIN_SAMPLES,
     MAX_HDBSCAN_NOISE_FRACTION,
@@ -119,12 +119,15 @@ from src.config import (
     OUTPUTS_TABLES_DIR,
     RANDOM_STATE,
     SCALED_FEATURES_PARQUET,
+    SPECTRAL_AFFINITY,
+    SPECTRAL_N_NEIGHBORS,
 )
 from src.preprocessing import FEATURE_COLS
 
 logger = logging.getLogger(__name__)
 
 VALIDATION_CSV = OUTPUTS_TABLES_DIR / "cluster_validation.csv"
+CLUSTER_RANKING_CSV = OUTPUTS_TABLES_DIR / "cluster_ranking.csv"
 STABILITY_PNG = OUTPUTS_FIGURES_DIR / "stability_ari.png"
 
 
@@ -179,7 +182,6 @@ def _compute_internal_metrics(
     """
     is_noise = labels == -1
     noise_fraction = float(is_noise.mean())
-    n_all = len(labels)
 
     # Restrict metrics to non-noise points.
     mask = ~is_noise
@@ -310,6 +312,20 @@ def _one_bootstrap_round(
         boot_labels = m.fit_predict(X[uid])
         return adjusted_rand_score(ref[uid], boot_labels)
 
+    if algo == "Agglomerative":
+        k = params["k"]
+        m = AgglomerativeClustering(n_clusters=k, linkage=AGGLOMERATIVE_LINKAGE)
+        boot_labels = m.fit_predict(X[uid])
+        return adjusted_rand_score(ref[uid], boot_labels)
+
+    if algo == "Spectral":
+        k = params["k"]
+        m = SpectralClustering(n_clusters=k, affinity=SPECTRAL_AFFINITY,
+                               n_neighbors=SPECTRAL_N_NEIGHBORS,
+                               assign_labels="kmeans", random_state=seed)
+        boot_labels = m.fit_predict(X[uid])
+        return adjusted_rand_score(ref[uid], boot_labels)
+
     raise ValueError(f"Unknown algorithm: {algo}")
 
 
@@ -374,6 +390,31 @@ def _summarise_stability(ari_scores: dict[str, list[float]]) -> pd.DataFrame:
     return df
 
 
+def _rank_algorithms(metrics_df: pd.DataFrame, stability_df: pd.DataFrame) -> pd.DataFrame:
+    """Rank algorithms across all internal + stability metrics into a mean rank.
+
+    Combines Silhouette (higher better), Davies-Bouldin (lower better),
+    Calinski-Harabasz (higher better) and bootstrap ARI (higher better) into a
+    single 'who wins overall' table.  Algorithms with undefined metrics (e.g.
+    DBSCAN with one cluster) are ranked last on those metrics.
+    """
+    combined = metrics_df.join(stability_df, how="inner")
+    specs = {
+        "silhouette": False,         # higher better
+        "davies_bouldin": True,      # lower better
+        "calinski_harabasz": False,  # higher better
+        "ARI_mean": False,           # higher better
+    }
+    ranks = pd.DataFrame(index=combined.index)
+    for col, ascending in specs.items():
+        ranks[f"{col}_rank"] = combined[col].rank(
+            ascending=ascending, method="min", na_option="bottom")
+    ranks["mean_rank"] = ranks.mean(axis=1).round(2)
+    ranks = ranks.sort_values("mean_rank")
+    ranks["overall_rank"] = range(1, len(ranks) + 1)
+    return ranks
+
+
 # ---------------------------------------------------------------------------
 # Visualisation
 # ---------------------------------------------------------------------------
@@ -394,8 +435,9 @@ def _plot_stability_boxplot(ari_scores: dict[str, list[float]]) -> None:
 
     labels = list(ari_scores.keys())
     data = [ari_scores[k] for k in labels]
-    _palette = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
-    colours = _palette[: len(labels)]
+    _palette = ["#4C72B0", "#DD8452", "#55A868", "#C44E52",
+                "#8172B3", "#937860", "#DA8BC3", "#8C8C8C"]
+    colours = [_palette[i % len(_palette)] for i in range(len(labels))]
 
     bp = ax.boxplot(
         data,
@@ -591,6 +633,8 @@ def run_validation(
         "DBSCAN":  "DBSCAN_Cluster",
         "GMM":     "GMM_Cluster",
         "HDBSCAN": "HDBSCAN_Cluster",
+        "Agglomerative": "Agglomerative_Cluster",
+        "Spectral":      "Spectral_Cluster",
     }
     if labels_dict is None:
         logger.info("Loading cluster labels from %s", CLUSTER_PARQUET)
@@ -612,6 +656,10 @@ def run_validation(
         if "DBSCAN" in labels_dict:
             _eps = DBSCAN_EPS if DBSCAN_EPS is not None else 0.5
             algo_params["DBSCAN"] = {"eps": _eps}
+        if "Agglomerative" in labels_dict:
+            algo_params["Agglomerative"] = {"k": int(len(np.unique(labels_dict["Agglomerative"])))}
+        if "Spectral" in labels_dict:
+            algo_params["Spectral"] = {"k": int(len(np.unique(labels_dict["Spectral"])))}
 
     logger.info(
         "Validating %d customers across %d algorithms: %s",
@@ -628,6 +676,12 @@ def run_validation(
     ari_scores = _run_stability_analysis(X, labels_dict, algo_params)
     stability_df = _summarise_stability(ari_scores)
     _plot_stability_boxplot(ari_scores)
+
+    # ── Overall ranking across all metrics ─────────────────────────────────
+    ranking = _rank_algorithms(metrics_df, stability_df)
+    ranking.to_csv(CLUSTER_RANKING_CSV)
+    logger.info("Algorithm ranking saved to %s\n%s",
+                CLUSTER_RANKING_CSV, ranking.to_string())
 
     # ── Algorithm selection ────────────────────────────────────────────────
     best = select_best_algorithm(metrics_df, stability_df)

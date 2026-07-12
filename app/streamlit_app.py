@@ -181,10 +181,11 @@ def page_churn() -> None:
                        "Feature importance")
 
     st.subheader("Churn-probability distribution")
-    st.bar_chart(
-        pd.cut(churn["churn_probability"], bins=20).value_counts().sort_index()
-        .rename_axis("probability_bin").rename("customers")
-    )
+    binned = pd.cut(churn["churn_probability"], bins=20).value_counts().sort_index()
+    # pandas Interval objects can't be serialised to the chart spec; convert the
+    # bins to readable string range labels first.
+    binned.index = [f"{iv.left:.2f}–{iv.right:.2f}" for iv in binned.index]
+    st.bar_chart(binned.rename_axis("probability_bin").rename("customers"))
 
 
 def page_migration() -> None:

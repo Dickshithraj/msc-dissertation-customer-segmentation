@@ -42,6 +42,8 @@ _LABEL_COL: dict[str, str] = {
     "K-Means":  "KMeans_Cluster",
     "GMM":      "GMM_Cluster",
     "DBSCAN":   "DBSCAN_Cluster",
+    "Agglomerative": "Agglomerative_Cluster",
+    "Spectral":      "Spectral_Cluster",
 }
 
 PROFILE_CSV = OUTPUTS_TABLES_DIR / "segment_profiles.csv"
@@ -200,12 +202,26 @@ def _plot_radar(
     profiles: pd.DataFrame,
     names: dict[int, str],
     algo: str,
+    population: pd.DataFrame,
 ) -> None:
     """Save a radar/spider chart comparing non-noise cluster profiles.
 
-    Features are min-max normalised across clusters so every axis shares the
-    same [0, 1] scale.  Recency and AvgInterPurchaseDays are inverted before
-    normalisation (lower = better becomes outward = better).
+    Each feature is expressed as the **percentile rank of the segment's mean
+    within the full customer population** (0-1): an axis value of 0.8 means the
+    segment's average sits above 80% of customers on that feature.  Recency is
+    inverted (lower = better -> outward = better).
+
+    ``AvgInterPurchaseDays`` is intentionally omitted from the radar: a one-time
+    buyer has a value of 0 (no repeat-purchase interval), which under a
+    "lower = better" inversion would wrongly rank them as having excellent
+    cadence.  Frequency already captures purchase intensity without this
+    ambiguity, and the raw value is still shown in the heatmap.
+
+    Percentile rank is used instead of min-max across the cluster means because
+    the latter is degenerate when there are only two non-noise segments (every
+    axis is forced to exactly 0 or 1, collapsing a segment to a single spike).
+    Ranking against the population is robust to the number of clusters and stays
+    interpretable.
     """
     non_noise = profiles[profiles.index != -1].copy()
     if len(non_noise) < 2:
@@ -215,16 +231,21 @@ def _plot_radar(
         )
         return
 
-    feat_data = non_noise[FEATURE_COLS].copy()
-    for col in ("Recency", "AvgInterPurchaseDays"):
-        feat_data[col] = feat_data[col].max() - feat_data[col]
-
-    mn, mx = feat_data.min(), feat_data.max()
-    norm = (feat_data - mn) / (mx - mn + 1e-9)
+    # Exclude AvgInterPurchaseDays (see docstring: 0 for one-time buyers would
+    # invert to "best cadence"). The remaining axes are cleanly directional.
+    radar_cols = [c for c in FEATURE_COLS if c != "AvgInterPurchaseDays"]
+    inverted = {"Recency"}  # lower = better
+    norm = pd.DataFrame(index=non_noise.index, columns=radar_cols, dtype=float)
+    for col in radar_cols:
+        pop = population[col].to_numpy()
+        n_pop = len(pop)
+        for cid in non_noise.index:
+            pct = float((pop <= non_noise.loc[cid, col]).sum()) / n_pop
+            norm.loc[cid, col] = (1.0 - pct) if col in inverted else pct
 
     categories = [
         "Recency\n(inv)", "Frequency", "Monetary",
-        "Tenure", "Avg\nOrder\nValue", "Inter-Purchase\n(inv)", "Distinct\nProducts",
+        "Tenure", "Avg\nOrder\nValue", "Distinct\nProducts",
     ]
     N = len(categories)
     angles = [n / N * 2 * np.pi for n in range(N)]
@@ -250,7 +271,7 @@ def _plot_radar(
     ax.set_yticks([0.25, 0.5, 0.75, 1.0])
     ax.set_yticklabels(["25%", "50%", "75%", "100%"], fontsize=7, color="#888")
     ax.set_title(
-        f"Cluster Radar Chart — {algo}\n(0-1 normalised; outward = better)",
+        f"Cluster Radar Chart — {algo}\n(axis = percentile vs all customers; outward = better)",
         fontsize=11, fontweight="bold", pad=22,
     )
     ax.legend(loc="upper right", bbox_to_anchor=(1.45, 1.18), fontsize=9)
@@ -322,6 +343,6 @@ def profile_clusters(
     logger.info("Segment profiles saved to %s", PROFILE_CSV)
 
     _plot_heatmap(profiles, names, algo)
-    _plot_radar(profiles, names, algo)
+    _plot_radar(profiles, names, algo, population=cluster_df[FEATURE_COLS])
 
     return profiles

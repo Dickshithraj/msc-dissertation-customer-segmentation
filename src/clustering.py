@@ -41,13 +41,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.cluster import DBSCAN, KMeans
+from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans, SpectralClustering
 from sklearn.decomposition import PCA
 from sklearn.metrics import davies_bouldin_score, silhouette_score
 from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors
 
 from src.config import (
+    AGGLOMERATIVE_LINKAGE,
     CLUSTER_PARQUET,
     CUSTOMER_FEATURES_PARQUET,
     DATA_PROCESSED_DIR,
@@ -65,6 +66,8 @@ from src.config import (
     OUTPUTS_TABLES_DIR,
     RANDOM_STATE,
     SCALED_FEATURES_PARQUET,
+    SPECTRAL_AFFINITY,
+    SPECTRAL_N_NEIGHBORS,
 )
 from src.preprocessing import FEATURE_COLS
 
@@ -113,14 +116,41 @@ def _kmeans_sweep(X: np.ndarray) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _elbow_k(metrics: pd.DataFrame) -> int:
+    """Return the Elbow-method k: the point of maximum curvature on the inertia
+    (WCSS) curve.
+
+    Found geometrically (the Kneedle construction, Satopaa et al. 2011): the k
+    whose normalised inertia point lies farthest from the straight line joining
+    the first and last points of the curve.  Reported alongside the silhouette
+    choice so the number of clusters is justified by **both** the Elbow Method
+    and Silhouette Analysis, as set out in the project scope.
+    """
+    k = metrics["k"].to_numpy(dtype=float)
+    inertia = metrics["inertia"].to_numpy(dtype=float)
+    x = (k - k.min()) / (k.max() - k.min() + 1e-12)
+    y = (inertia - inertia.min()) / (inertia.max() - inertia.min() + 1e-12)
+    dx, dy = x[-1] - x[0], y[-1] - y[0]
+    norm = np.hypot(dx, dy)
+    perp = np.abs(dx * (y - y[0]) - dy * (x - x[0])) / norm
+    return int(k[int(np.argmax(perp))])
+
+
 def _pick_best_k(metrics: pd.DataFrame) -> int:
-    """Return k with highest silhouette, or the KMEANS_BEST_K config override."""
+    """Return k with highest silhouette, or the KMEANS_BEST_K config override.
+
+    The Elbow-method k is also computed and logged for comparison; silhouette
+    remains the decision criterion because it directly measures cluster
+    separation, whereas the elbow only locates a diminishing-returns inflection.
+    """
+    elbow = _elbow_k(metrics)
+    logger.info("Elbow method suggests k = %d (max curvature on inertia/WCSS).", elbow)
     if KMEANS_BEST_K is not None:
         logger.info("Using manually configured k = %d (KMEANS_BEST_K).", KMEANS_BEST_K)
         return KMEANS_BEST_K
     best = int(metrics.loc[metrics["silhouette"].idxmax(), "k"])
-    logger.info("Auto-selected k = %d (silhouette = %.4f).", best,
-                metrics["silhouette"].max())
+    logger.info("Selected k = %d by silhouette (%.4f); elbow method suggested k = %d.",
+                best, metrics["silhouette"].max(), elbow)
     return best
 
 
@@ -133,11 +163,15 @@ def _plot_kmeans_selection(metrics: pd.DataFrame, best_k: int) -> None:
         ("silhouette",     "Silhouette score",     "darkorange",  True),
         ("davies_bouldin", "Davies-Bouldin index", "forestgreen", False),
     ]
+    elbow_k = _elbow_k(metrics)
     for ax, (col, ylabel, colour, higher) in zip(axes, panels):
         ax.plot(metrics["k"], metrics[col], marker="o", color=colour,
                 linewidth=2, markersize=6)
         ax.axvline(best_k, color="red", linestyle="--", linewidth=1.5,
-                   label=f"k={best_k} chosen")
+                   label=f"k={best_k} chosen (silhouette)")
+        if col == "inertia":
+            ax.axvline(elbow_k, color="#8172B2", linestyle=":", linewidth=1.6,
+                       label=f"k={elbow_k} (elbow)")
         ax.set_xlabel("k", fontsize=10)
         ax.set_title(f"{ylabel}\n({'higher' if higher else 'lower'} = better)",
                      fontsize=10, fontweight="bold")
@@ -412,7 +446,53 @@ def _fit_hdbscan(X: np.ndarray) -> tuple[np.ndarray, object]:
 
 
 # ===========================================================================
-# PCA visualisation (2x2 grid — all four algorithms)
+# Agglomerative (hierarchical) & Spectral clustering
+# ===========================================================================
+
+def _fit_agglomerative(X: np.ndarray, k: int) -> tuple[np.ndarray, AgglomerativeClustering]:
+    """Fit Agglomerative (hierarchical, Ward-linkage) clustering with k clusters.
+
+    A bottom-up hierarchical method: every point starts as its own cluster and
+    the closest pairs are merged until k remain.  Ward linkage minimises the
+    increase in within-cluster variance at each merge, favouring compact,
+    balanced clusters — a useful contrast to the centroid (K-Means), density
+    (DBSCAN/HDBSCAN) and probabilistic (GMM) families.  k is shared with K-Means
+    so the comparison holds the cluster count constant.
+    """
+    logger.info("Fitting Agglomerative clustering (linkage=%s, k=%d).",
+                AGGLOMERATIVE_LINKAGE, k)
+    model = AgglomerativeClustering(n_clusters=k, linkage=AGGLOMERATIVE_LINKAGE)
+    labels = model.fit_predict(X)
+    logger.info("Agglomerative silhouette = %.4f",
+                silhouette_score(X, labels, sample_size=min(3000, len(X)),
+                                 random_state=RANDOM_STATE))
+    return labels, model
+
+
+def _fit_spectral(X: np.ndarray, k: int) -> tuple[np.ndarray, SpectralClustering]:
+    """Fit Spectral clustering with k clusters.
+
+    Spectral clustering embeds the data using the eigenvectors of a similarity-
+    graph Laplacian and clusters that embedding, letting it separate non-convex
+    / manifold structure that centroid methods cannot.  A sparse
+    ``nearest_neighbors`` affinity keeps it tractable at n ~ 6k.
+    """
+    logger.info("Fitting Spectral clustering (affinity=%s, k=%d).",
+                SPECTRAL_AFFINITY, k)
+    model = SpectralClustering(
+        n_clusters=k, affinity=SPECTRAL_AFFINITY,
+        n_neighbors=SPECTRAL_N_NEIGHBORS, assign_labels="kmeans",
+        random_state=RANDOM_STATE,
+    )
+    labels = model.fit_predict(X)
+    logger.info("Spectral silhouette = %.4f",
+                silhouette_score(X, labels, sample_size=min(3000, len(X)),
+                                 random_state=RANDOM_STATE))
+    return labels, model
+
+
+# ===========================================================================
+# PCA visualisation (grid — all algorithms)
 # ===========================================================================
 
 def _plot_pca_all(
@@ -439,7 +519,13 @@ def _plot_pca_all(
     ev = pca.explained_variance_ratio_
     logger.info("PCA: PC1=%.1f%%, PC2=%.1f%% explained.", ev[0]*100, ev[1]*100)
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    n_algos = len(all_labels)
+    ncols = 2
+    nrows = (n_algos + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 5 * nrows))
+    axes = np.atleast_1d(axes).flatten()
+    for extra_ax in axes[n_algos:]:  # hide unused cell(s) if the count is odd
+        extra_ax.set_visible(False)
     fig.suptitle(
         f"All-algorithm PCA projection\n"
         f"PC1 {ev[0]*100:.1f}% + PC2 {ev[1]*100:.1f}% = "
@@ -447,7 +533,7 @@ def _plot_pca_all(
         fontsize=12, fontweight="bold",
     )
 
-    for ax, (algo, labels) in zip(axes.flat, all_labels.items()):
+    for ax, (algo, labels) in zip(axes, all_labels.items()):
         unique = sorted(np.unique(labels))
         n_real = len([c for c in unique if c != -1])
         ax.set_title(f"{algo}  ({n_real} clusters)", fontsize=11,
@@ -543,12 +629,18 @@ def run_all_clustering(X: np.ndarray | None = None) -> dict:
     # ── HDBSCAN ───────────────────────────────────────────────────────────
     hdb_labels, hdb_model = _fit_hdbscan(X)
 
-    # ── PCA (2x2) ─────────────────────────────────────────────────────────
+    # ── Agglomerative (Ward) & Spectral ───────────────────────────────────
+    agg_labels, agg_model = _fit_agglomerative(X, best_k)
+    spec_labels, spec_model = _fit_spectral(X, best_k)
+
+    # ── PCA grid (all algorithms) ─────────────────────────────────────────
     all_labels = {
-        "K-Means":  km_labels,
-        "DBSCAN":   db_labels,
-        "GMM":      gmm_labels,
-        "HDBSCAN":  hdb_labels,
+        "K-Means":        km_labels,
+        "DBSCAN":         db_labels,
+        "GMM":            gmm_labels,
+        "HDBSCAN":        hdb_labels,
+        "Agglomerative":  agg_labels,
+        "Spectral":       spec_labels,
     }
     _plot_pca_all(X, all_labels)
 
@@ -559,6 +651,8 @@ def run_all_clustering(X: np.ndarray | None = None) -> dict:
         "DBSCAN_Cluster": db_labels,
         "GMM_Cluster":    gmm_labels,
         "HDBSCAN_Cluster": hdb_labels,
+        "Agglomerative_Cluster": agg_labels,
+        "Spectral_Cluster":      spec_labels,
     })
     features_df = pd.read_parquet(CUSTOMER_FEATURES_PARQUET)
     cluster_df = cluster_df.merge(features_df, on="Customer ID", how="left")
@@ -573,17 +667,12 @@ def run_all_clustering(X: np.ndarray | None = None) -> dict:
         logger.info("%s: %s", algo, "  ".join(parts))
 
     return {
-        "kmeans":       {"labels": km_labels,  "model": km_model},
-        "dbscan":       {"labels": db_labels,  "model": db_model, "eps": db_eps},
-        "gmm":          {"labels": gmm_labels, "model": gmm_model},
-        "hdbscan":      {"labels": hdb_labels, "model": hdb_model},
-        "customer_ids": customer_ids,
-        "cluster_df":   cluster_df,
+        "kmeans":        {"labels": km_labels,   "model": km_model},
+        "dbscan":        {"labels": db_labels,   "model": db_model, "eps": db_eps},
+        "gmm":           {"labels": gmm_labels,  "model": gmm_model},
+        "hdbscan":       {"labels": hdb_labels,  "model": hdb_model},
+        "agglomerative": {"labels": agg_labels,  "model": agg_model},
+        "spectral":      {"labels": spec_labels, "model": spec_model},
+        "customer_ids":  customer_ids,
+        "cluster_df":    cluster_df,
     }
-
-
-# Backward-compatible alias kept so any cached imports still work.
-def run_clustering(*args, **kwargs) -> pd.DataFrame:
-    """Alias for run_all_clustering(); returns cluster_df for compatibility."""
-    result = run_all_clustering(*args, **kwargs)
-    return result["cluster_df"]

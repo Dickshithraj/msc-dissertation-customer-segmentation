@@ -43,14 +43,14 @@ every artefact to `data/processed/` and `outputs/`.
 | 1     | `src/data_loading.py`, `src/cleaning.py` | Load both Excel sheets; clean (drop missing IDs, cancellations, invalid qty/price, duplicates) with an audit trail |
 | 2     | `src/features.py` | Build customer-level RFM + extended features (Tenure, AvgOrderValue, AvgInterPurchaseDays, DistinctProducts) |
 | 2b    | `src/preprocessing.py` | `log1p` skewed features, then `StandardScaler` |
-| 3–4   | `src/clustering.py` | K-Means (silhouette sweep), DBSCAN (k-distance knee), GMM (BIC), HDBSCAN |
+| 3–4   | `src/clustering.py` | K-Means (Elbow + silhouette sweep), DBSCAN (k-distance knee), GMM (BIC), HDBSCAN |
 | 3b    | `src/validation.py` | Silhouette / Davies-Bouldin / Calinski-Harabasz + bootstrap ARI stability; selects the best algorithm |
 | 6     | `src/profiling.py` | Per-segment un-scaled means, rule-based marketing names, heatmap + radar |
 | 7     | `src/clv.py` | BG/NBD + Gamma-Gamma CLV with 90/180/365-day purchase forecasts |
 | 8     | `src/churn.py` | Logistic Regression / Random Forest / XGBoost churn models, ranked by ROC-AUC |
 | 9     | `src/migration.py` | Year-on-year segment transition matrix + heatmap |
-| 10    | `src/notifications.py` | Rule-based campaign engine; `recommend(customer_id)` |
-| 11    | `src/roi.py` | Monte Carlo ROI simulation (10,000 runs) with credible interval |
+| 10    | `src/notifications.py` | Cluster-driven campaign engine (segment = customer's cluster, modulated by CLV/churn); on-demand `recommend(customer_id)` |
+| 11    | `src/roi.py` | Monte Carlo ROI simulation (10,000 runs) with credible interval **+ uplift vs a static blanket-marketing baseline** |
 | 12    | `app/streamlit_app.py` | Interactive dashboard over all artefacts |
 
 ---
@@ -72,6 +72,12 @@ every artefact to `data/processed/` and `outputs/`.
 - **ROI realism** — gross order value is converted to profit contribution via
   retail gross margin net of promotional discount, avoiding the naive
   "full order value = profit" inflation.
+- **Cluster-driven targeting** — every customer's campaign segment is the name
+  of the unsupervised cluster (Stage 3) they belong to, so the notification
+  engine is genuinely cluster-based rather than a parallel rule pass.
+- **Uplift vs static marketing** — the ROI stage also simulates an untargeted
+  "blanket" campaign and reports the ROI/profit uplift of the targeted plan over
+  it, quantifying the value of segmentation rather than an absolute figure alone.
 
 ---
 
@@ -95,6 +101,10 @@ every artefact to `data/processed/` and `outputs/`.
 │   ├── notifications.py
 │   └── roi.py
 ├── app/streamlit_app.py     # interactive dashboard
+├── scripts/                 # report generators (run after the pipeline)
+│   ├── build_notebook.py        # -> executed Jupyter notebook of the pipeline
+│   ├── generate_report.py       # -> single self-contained HTML report
+│   └── build_github_report.py   # -> docs/RESULTS.md (GitHub-renderable)
 ├── tests/                   # pytest suite (synthetic data, no Excel needed)
 ├── data/
 │   ├── raw/raj.xlsx         # input (not committed)
@@ -102,6 +112,10 @@ every artefact to `data/processed/` and `outputs/`.
 ├── outputs/
 │   ├── figures/             # PNG charts (generated)
 │   └── tables/              # CSV results (generated)
+├── docs/                    # results report + dissertation documents
+│   ├── RESULTS.md           # GitHub-renderable results write-up
+│   ├── figures/             # figures embedded in RESULTS.md
+│   └── dissertation/        # specs + marking guidance (Word/PDF)
 └── requirements.txt
 ```
 

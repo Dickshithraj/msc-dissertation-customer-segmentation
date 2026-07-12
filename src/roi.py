@@ -35,6 +35,14 @@ Per iteration the totals are aggregated across all groups and:
 The output reports the mean/median ROI, a central ``ROI_CI_LEVEL`` credible
 interval, the probability of a positive ROI, and expected net profit.
 
+Uplift versus static marketing
+------------------------------
+The same machinery is also run on a **static "blanket" baseline** -- every
+customer contacted once on one channel with one generic offer at a low
+untargeted response rate -- and the summary reports the ROI/profit *uplift* of
+the targeted, cluster-based plan over it.  This is the "versus static methods"
+comparison the project's scope calls for.
+
 Outputs
 -------
 outputs/tables/roi_simulation_summary.csv -- headline statistics
@@ -64,6 +72,8 @@ from src.config import (
     ROI_OFFER_DISCOUNT,
     ROI_RESPONSE_CONCENTRATION,
     ROI_REVENUE_NOISE_SD,
+    ROI_STATIC_CHANNEL,
+    ROI_STATIC_RESPONSE,
 )
 
 logger = logging.getLogger(__name__)
@@ -127,6 +137,36 @@ def _build_campaign_table(
     return grp
 
 
+def _build_static_baseline(plan: pd.DataFrame, clv: pd.DataFrame) -> pd.DataFrame:
+    """Build the single-row 'blanket marketing' baseline campaign table.
+
+    Represents untargeted, static-profiling marketing: every customer is
+    contacted once on a single channel (``ROI_STATIC_CHANNEL``) with one generic
+    low-response offer (``ROI_STATIC_RESPONSE``).  Simulating this alongside the
+    targeted plan lets the project quantify the *uplift* of cluster-based
+    targeting over a one-size-fits-all campaign -- the comparison "versus static
+    methods" promised in the scope.
+    """
+    merged = plan.merge(
+        clv[["Customer ID", "AvgOrderValue"]], on="Customer ID", how="left",
+    )
+    n = int(len(merged))
+    aov = float(merged["AvgOrderValue"].mean())
+    cost_per_contact = _channel_cost(ROI_STATIC_CHANNEL)
+    grp = pd.DataFrame(
+        {
+            "n_customers": [n],
+            "mean_aov": [aov],
+            "cost_per_contact": [cost_per_contact],
+            "response_prior": [ROI_STATIC_RESPONSE],
+            "total_cost": [n * cost_per_contact],
+        },
+        index=pd.Index(["Blanket (static) campaign"], name="action"),
+    )
+    logger.info("Static baseline campaign:\n%s", grp.round(3).to_string())
+    return grp
+
+
 # ---------------------------------------------------------------------------
 # Simulation
 # ---------------------------------------------------------------------------
@@ -179,8 +219,16 @@ def _simulate(campaigns: pd.DataFrame) -> dict[str, np.ndarray]:
     }
 
 
-def _summarise(sim: dict[str, np.ndarray]) -> pd.DataFrame:
-    """Reduce the simulation arrays to a one-column summary table."""
+def _summarise(
+    sim: dict[str, np.ndarray],
+    baseline_sim: dict[str, np.ndarray] | None = None,
+) -> pd.DataFrame:
+    """Reduce the simulation arrays to a one-column summary table.
+
+    When ``baseline_sim`` (the static blanket campaign) is supplied, the table
+    also reports the static baseline's ROI/profit and the **uplift** of the
+    targeted plan over it -- the headline "versus static methods" figure.
+    """
     roi = sim["roi"]
     profit = sim["profit"]
     revenue = sim["revenue"]
@@ -203,6 +251,21 @@ def _summarise(sim: dict[str, np.ndarray]) -> pd.DataFrame:
         "prob_positive_roi": round(float((roi > 0).mean()), 4),
         "prob_roi_gt_1": round(float((roi > 1.0).mean()), 4),
     }
+
+    if baseline_sim is not None:
+        b_roi = baseline_sim["roi"]
+        b_profit = baseline_sim["profit"]
+        b_mean_profit = float(b_profit.mean())
+        stats["static_total_cost"] = round(float(baseline_sim["cost"][0]), 2)
+        stats["static_mean_profit"] = round(b_mean_profit, 2)
+        stats["static_mean_roi"] = round(float(b_roi.mean()), 4)
+        stats["roi_uplift_vs_static"] = round(float(roi.mean() - b_roi.mean()), 4)
+        stats["profit_uplift_vs_static"] = round(float(profit.mean() - b_mean_profit), 2)
+        stats["profit_uplift_pct_vs_static"] = (
+            round((profit.mean() - b_mean_profit) / abs(b_mean_profit) * 100, 1)
+            if b_mean_profit != 0 else float("nan")
+        )
+
     df = pd.DataFrame.from_dict(stats, orient="index", columns=["value"])
     logger.info("ROI simulation summary:\n%s", df.to_string())
     return df
@@ -212,8 +275,15 @@ def _summarise(sim: dict[str, np.ndarray]) -> pd.DataFrame:
 # Visualisation
 # ---------------------------------------------------------------------------
 
-def _plot_distribution(sim: dict[str, np.ndarray]) -> None:
-    """Save a 2-panel histogram: ROI distribution and net-profit distribution."""
+def _plot_distribution(
+    sim: dict[str, np.ndarray],
+    baseline_sim: dict[str, np.ndarray] | None = None,
+) -> None:
+    """Save a 2-panel histogram: ROI distribution and net-profit distribution.
+
+    If ``baseline_sim`` is supplied, the static blanket campaign's mean ROI and
+    mean profit are overlaid so the uplift of targeting is visible at a glance.
+    """
     roi = sim["roi"]
     profit = sim["profit"]
     lo_q = (1.0 - ROI_CI_LEVEL) / 2.0
@@ -224,11 +294,15 @@ def _plot_distribution(sim: dict[str, np.ndarray]) -> None:
 
     axes[0].hist(roi, bins=60, color="#4C72B0", edgecolor="white", alpha=0.85)
     axes[0].axvline(roi.mean(), color="#C44E52", linestyle="-", linewidth=1.8,
-                    label=f"Mean ROI = {roi.mean():.2f}")
+                    label=f"Targeted mean ROI = {roi.mean():.2f}")
     axes[0].axvline(roi_lo, color="#333", linestyle="--", linewidth=1.3,
                     label=f"{int(ROI_CI_LEVEL*100)}% CI = [{roi_lo:.2f}, {roi_hi:.2f}]")
     axes[0].axvline(roi_hi, color="#333", linestyle="--", linewidth=1.3)
     axes[0].axvline(0, color="grey", linewidth=1.0)
+    if baseline_sim is not None:
+        b_roi_mean = float(baseline_sim["roi"].mean())
+        axes[0].axvline(b_roi_mean, color="#8172B2", linestyle=":", linewidth=2.0,
+                        label=f"Static baseline ROI = {b_roi_mean:.2f}")
     axes[0].set_xlabel("Campaign ROI  =  (revenue - cost) / cost", fontsize=10)
     axes[0].set_ylabel("Simulation count", fontsize=10)
     axes[0].set_title(f"ROI distribution\n({ROI_N_SIMULATIONS:,} Monte Carlo runs)",
@@ -238,8 +312,12 @@ def _plot_distribution(sim: dict[str, np.ndarray]) -> None:
 
     axes[1].hist(profit, bins=60, color="#55A868", edgecolor="white", alpha=0.85)
     axes[1].axvline(profit.mean(), color="#C44E52", linestyle="-", linewidth=1.8,
-                    label=f"Mean profit = {profit.mean():,.0f}")
+                    label=f"Targeted mean profit = {profit.mean():,.0f}")
     axes[1].axvline(0, color="grey", linewidth=1.0)
+    if baseline_sim is not None:
+        b_profit_mean = float(baseline_sim["profit"].mean())
+        axes[1].axvline(b_profit_mean, color="#8172B2", linestyle=":", linewidth=2.0,
+                        label=f"Static baseline profit = {b_profit_mean:,.0f}")
     axes[1].set_xlabel("Net profit (revenue - cost)", fontsize=10)
     axes[1].set_ylabel("Simulation count", fontsize=10)
     axes[1].set_title("Net-profit distribution", fontsize=11, fontweight="bold")
@@ -291,11 +369,17 @@ def run_roi_simulation(
 
     campaigns = _build_campaign_table(plan, clv)
     sim = _simulate(campaigns)
-    summary = _summarise(sim)
+
+    # Static "blanket marketing" baseline, simulated the same way, so we can
+    # report the uplift of the targeted, cluster-based plan over it.
+    baseline = _build_static_baseline(plan, clv)
+    baseline_sim = _simulate(baseline)
+
+    summary = _summarise(sim, baseline_sim)
 
     OUTPUTS_TABLES_DIR.mkdir(parents=True, exist_ok=True)
     summary.to_csv(ROI_SUMMARY_CSV)
     logger.info("ROI summary saved to %s", ROI_SUMMARY_CSV)
 
-    _plot_distribution(sim)
+    _plot_distribution(sim, baseline_sim)
     return summary

@@ -9,7 +9,7 @@ on GitHub (the live ``outputs/`` artefacts stay git-ignored as regenerable).
 
 Run from the project root::
 
-    python build_github_report.py
+    python scripts/build_github_report.py
 
 Then commit ``docs/`` and view ``docs/RESULTS.md`` on GitHub.
 """
@@ -20,7 +20,7 @@ import csv
 import shutil
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent  # repo root (scripts/ is one level down)
 DOCS_DIR = PROJECT_ROOT / "docs"
 DOCS_FIGURES = DOCS_DIR / "figures"
 OUT_MD = DOCS_DIR / "RESULTS.md"

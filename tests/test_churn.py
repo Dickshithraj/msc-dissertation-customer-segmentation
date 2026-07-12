@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pandas as pd
-
 from src import churn
 from src.churn import CHURN_FEATURES, _build_label
 
