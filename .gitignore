@@ -61,3 +61,11 @@ desktop.ini
 
 # Streamlit secrets
 app/.streamlit/secrets.toml
+
+
+.claude/*
+
+# Not part of the submission
+/SoC-report-Template.docx
+docs/dissertation/vani_backup_*.docx
+docs/dissertation/Marking Guidance*.pdf

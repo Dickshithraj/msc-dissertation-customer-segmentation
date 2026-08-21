@@ -232,10 +232,10 @@ def build_cells() -> list:
         "and which prevents extreme spenders from distorting the distance metric."
     ))
 
-    # ── Stage 3-4 ─────────────────────────────────────────────────────────────
+    # ── Stage 3 ─────────────────────────────────────────────────────────────
     cells.append(_md(
         "---\n"
-        "## Stage 3–4 — Clustering (Four Algorithms)\n\n"
+        "## Stage 3 — Clustering (Four Algorithms)\n\n"
         "**Objective.** Discover natural customer segments without imposing a "
         "pre-defined number of groups.\n\n"
         "**Methodology.** Four complementary algorithms are fitted on the scaled "
@@ -300,10 +300,10 @@ def build_cells() -> list:
         "than relying on a single run."
     ))
 
-    # ── Stage 6 ───────────────────────────────────────────────────────────────
+    # ── Stage 4 ───────────────────────────────────────────────────────────────
     cells.append(_md(
         "---\n"
-        "## Stage 6 — Segment Profiling and Naming\n\n"
+        "## Stage 4 — Segment Profiling and Naming\n\n"
         "**Objective.** Translate abstract cluster labels into interpretable, "
         "marketing-ready customer segments.\n\n"
         "**Methodology.** For the selected algorithm, each cluster's mean feature "
@@ -329,10 +329,10 @@ def build_cells() -> list:
         "density-based methods are used for marketing segmentation."
     ))
 
-    # ── Stage 7 ───────────────────────────────────────────────────────────────
+    # ── Stage 5 ───────────────────────────────────────────────────────────────
     cells.append(_md(
         "---\n"
-        "## Stage 7 — Customer Lifetime Value\n\n"
+        "## Stage 5 — Customer Lifetime Value\n\n"
         "**Objective.** Estimate the forward-looking monetary value of each "
         "customer to prioritise marketing investment.\n\n"
         "**Methodology.** Two complementary probabilistic models from the "
@@ -365,10 +365,10 @@ def build_cells() -> list:
         "investment."
     ))
 
-    # ── Stage 8 ───────────────────────────────────────────────────────────────
+    # ── Stage 6 ───────────────────────────────────────────────────────────────
     cells.append(_md(
         "---\n"
-        "## Stage 8 — Churn Classification\n\n"
+        "## Stage 6 — Churn Classification\n\n"
         "**Objective.** Predict which customers are at risk of lapsing so they can "
         "be targeted before they leave.\n\n"
         "**Methodology.** A customer is labelled *churned* if their Recency exceeds "
@@ -398,10 +398,10 @@ def build_cells() -> list:
         "weighting are used throughout."
     ))
 
-    # ── Stage 9 ───────────────────────────────────────────────────────────────
+    # ── Stage 7 ───────────────────────────────────────────────────────────────
     cells.append(_md(
         "---\n"
-        "## Stage 9 — Year-on-Year Segment Migration\n\n"
+        "## Stage 7 — Year-on-Year Segment Migration\n\n"
         "**Objective.** Quantify how customers move between segments from one year "
         "to the next.\n\n"
         "**Methodology.** Each customer is segmented *independently within each "
@@ -429,10 +429,10 @@ def build_cells() -> list:
         "the campaign rules in the next stage."
     ))
 
-    # ── Stage 10 ──────────────────────────────────────────────────────────────
+    # ── Stage 8 ──────────────────────────────────────────────────────────────
     cells.append(_md(
         "---\n"
-        "## Stage 10 — Rule-Based Notification Engine\n\n"
+        "## Stage 8 — Rule-Based Notification Engine\n\n"
         "**Objective.** Convert the analytical signals into a concrete, auditable "
         "marketing action for every customer.\n\n"
         "**Methodology.** Each customer's **segment**, **CLV tier**, and **churn-risk "
@@ -461,10 +461,10 @@ def build_cells() -> list:
         "at-risk group triggers the expensive 'priority retention intervention'."
     ))
 
-    # ── Stage 11 ──────────────────────────────────────────────────────────────
+    # ── Stage 9 ──────────────────────────────────────────────────────────────
     cells.append(_md(
         "---\n"
-        "## Stage 11 — Monte Carlo ROI Simulation\n\n"
+        "## Stage 9 — Monte Carlo ROI Simulation\n\n"
         "**Objective.** Estimate the financial return of executing the notification "
         "plan, with an honest quantification of uncertainty.\n\n"
         "**Methodology.** Because response rates, per-conversion revenue, and costs "

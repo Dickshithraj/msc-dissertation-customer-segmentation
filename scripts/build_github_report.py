@@ -56,11 +56,16 @@ STAGES: list[dict] = [
         "figures": ["outputs/figures/scaling_effect.png"],
     },
     {
-        "title": "Stage 3-4 — Clustering (4 algorithms)",
-        "desc": "K-Means (silhouette sweep), DBSCAN (k-distance knee for eps), "
-                "Gaussian Mixture (BIC selection), and HDBSCAN.",
+        "title": "Stage 3 — Clustering (6 algorithms)",
+        "desc": "Six algorithms spanning five families, each with automatic "
+                "hyper-parameter selection: K-Means (silhouette sweep), DBSCAN "
+                "(k-distance knee for eps), Gaussian Mixture (BIC selection), "
+                "HDBSCAN, Agglomerative (Ward linkage), and Spectral.",
         "code": ["src/clustering.py"],
-        "tables": ["outputs/tables/kmeans_metrics.csv"],
+        "tables": [
+            "outputs/tables/kmeans_metrics.csv",
+            "outputs/tables/gmm_bic.csv",
+        ],
         "figures": [
             "outputs/figures/kmeans_selection.png",
             "outputs/figures/dbscan_kdistance.png",
@@ -71,15 +76,19 @@ STAGES: list[dict] = [
     {
         "title": "Stage 3b — Validation & Stability",
         "desc": "Internal metrics (Silhouette, Davies-Bouldin, Calinski-Harabasz) "
-                "and bootstrap ARI stability across 50 resamples; the best algorithm "
-                "is selected by a transparent rule (noise filter, ARI >= 0.70, then "
-                "highest silhouette).",
+                "and bootstrap ARI stability across 50 resamples, for all six "
+                "algorithms; the operational segmentation is selected by a "
+                "transparent, pre-declared rule (noise filter, ARI >= 0.70, then "
+                "highest silhouette) — HDBSCAN wins on this data.",
         "code": ["src/validation.py"],
-        "tables": ["outputs/tables/cluster_validation.csv"],
+        "tables": [
+            "outputs/tables/cluster_validation.csv",
+            "outputs/tables/cluster_ranking.csv",
+        ],
         "figures": ["outputs/figures/stability_ari.png"],
     },
     {
-        "title": "Stage 6 — Segment Profiling",
+        "title": "Stage 4 — Segment Profiling",
         "desc": "Per-segment un-scaled feature means with rule-based marketing names "
                 "(Champions, Loyal, At-Risk, Lost, ...), shown as a heatmap and radar.",
         "code": ["src/profiling.py"],
@@ -90,7 +99,7 @@ STAGES: list[dict] = [
         ],
     },
     {
-        "title": "Stage 7 — Customer Lifetime Value",
+        "title": "Stage 5 — Customer Lifetime Value",
         "desc": "BG/NBD (purchase process) + Gamma-Gamma (monetary process) to "
                 "forecast discounted 12-month CLV and 90/180/365-day purchase counts.",
         "code": ["src/clv.py"],
@@ -98,19 +107,26 @@ STAGES: list[dict] = [
         "figures": ["outputs/figures/clv_distribution.png"],
     },
     {
-        "title": "Stage 8 — Churn Classification",
-        "desc": "Logistic Regression / Random Forest / XGBoost compared by ROC-AUC. "
-                "Recency is excluded from the features to avoid target leakage "
-                "(churn is defined from Recency).",
+        "title": "Stage 6 — Churn Classification",
+        "desc": "Six classifiers (Logistic Regression, Random Forest, XGBoost, "
+                "Gradient Boosting, Decision Tree, KNN) compared on ROC-AUC, PR-AUC, "
+                "F1 and cross-validated ROC-AUC, with pairwise McNemar exact tests "
+                "for significance. Recency is excluded from the features to avoid "
+                "target leakage (churn is defined from Recency).",
         "code": ["src/churn.py"],
-        "tables": ["outputs/tables/churn_model_comparison.csv"],
+        "tables": [
+            "outputs/tables/churn_model_comparison.csv",
+            "outputs/tables/churn_model_ranking.csv",
+            "outputs/tables/churn_mcnemar_pvalues.csv",
+        ],
         "figures": [
             "outputs/figures/churn_roc_curves.png",
+            "outputs/figures/churn_pr_curves.png",
             "outputs/figures/churn_feature_importance.png",
         ],
     },
     {
-        "title": "Stage 9 — Segment Migration",
+        "title": "Stage 7 — Segment Migration",
         "desc": "Year-on-year segment transition matrix over customers present in "
                 "both years, with retained / lapsed / new cohort sizes.",
         "code": ["src/migration.py"],
@@ -121,7 +137,7 @@ STAGES: list[dict] = [
         "figures": ["outputs/figures/segment_migration.png"],
     },
     {
-        "title": "Stage 10 — Notification Engine",
+        "title": "Stage 8 — Notification Engine",
         "desc": "Rule-based campaign engine combining segment, CLV tier, and churn "
                 "risk into an action / channel / offer / priority per customer; "
                 "exposes recommend(customer_id).",
@@ -130,16 +146,44 @@ STAGES: list[dict] = [
         "figures": [],
     },
     {
-        "title": "Stage 11 — Monte Carlo ROI",
+        "title": "Stage 9 — Monte Carlo ROI",
         "desc": "10,000-iteration simulation of campaign ROI with Beta response "
                 "priors, Binomial conversions, and a margin/discount adjustment; "
-                "reports mean ROI, a 95% credible interval, and P(ROI > 0).",
+                "reports mean ROI, a 95% credible interval, P(ROI > 0), and the "
+                "profit uplift over an untargeted blanket-marketing baseline.",
         "code": ["src/roi.py"],
         "tables": ["outputs/tables/roi_simulation_summary.csv"],
         "figures": ["outputs/figures/roi_distribution.png"],
     },
     {
-        "title": "Stage 12 — Streamlit Dashboard",
+        "title": "Stage 9b — CLV Temporal Validation",
+        "desc": "Calibration/holdout split of the BG/NBD model: fit on year 1, "
+                "score against unseen year-2 purchases, reporting MAE, RMSE, "
+                "Pearson r and aggregate bias.",
+        "code": ["src/clv_validation.py"],
+        "tables": ["outputs/tables/clv_holdout_metrics.csv"],
+        "figures": ["outputs/figures/clv_holdout_validation.png"],
+    },
+    {
+        "title": "Stage 9c — Churn Threshold Sensitivity",
+        "desc": "Re-derives the churn label at the 85th, 90th and 95th Recency "
+                "percentile and re-scores every model, testing whether the "
+                "conclusions depend on the arbitrary label cut-off.",
+        "code": ["src/churn_sensitivity.py"],
+        "tables": ["outputs/tables/churn_threshold_sensitivity.csv"],
+        "figures": [],
+    },
+    {
+        "title": "Stage 9d — ROI Assumption Sensitivity",
+        "desc": "Re-runs both the targeted and blanket simulations under perturbed "
+                "margin, response-rate, contact-cost and compound-worst-case "
+                "assumptions, reporting mean uplift and P(uplift > 0) per scenario.",
+        "code": ["src/roi_sensitivity.py"],
+        "tables": ["outputs/tables/roi_sensitivity.csv"],
+        "figures": ["outputs/figures/roi_sensitivity.png"],
+    },
+    {
+        "title": "Stage 10 — Streamlit Dashboard",
         "desc": "Interactive 8-page dashboard over every artefact, including a live "
                 "customer-lookup that calls recommend(customer_id).",
         "code": ["app/streamlit_app.py"],

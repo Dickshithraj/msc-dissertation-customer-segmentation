@@ -9,15 +9,18 @@ Each stage below shows a short description, the source code (click to expand), t
 - [Stage 1 — Data Loading & Cleaning](#stage-1--data-loading--cleaning)
 - [Stage 2 — Feature Engineering](#stage-2--feature-engineering)
 - [Stage 2b — Preprocessing](#stage-2b--preprocessing)
-- [Stage 3-4 — Clustering (4 algorithms)](#stage-3-4--clustering-4-algorithms)
+- [Stage 3 — Clustering (6 algorithms)](#stage-3--clustering-6-algorithms)
 - [Stage 3b — Validation & Stability](#stage-3b--validation--stability)
-- [Stage 6 — Segment Profiling](#stage-6--segment-profiling)
-- [Stage 7 — Customer Lifetime Value](#stage-7--customer-lifetime-value)
-- [Stage 8 — Churn Classification](#stage-8--churn-classification)
-- [Stage 9 — Segment Migration](#stage-9--segment-migration)
-- [Stage 10 — Notification Engine](#stage-10--notification-engine)
-- [Stage 11 — Monte Carlo ROI](#stage-11--monte-carlo-roi)
-- [Stage 12 — Streamlit Dashboard](#stage-12--streamlit-dashboard)
+- [Stage 4 — Segment Profiling](#stage-4--segment-profiling)
+- [Stage 5 — Customer Lifetime Value](#stage-5--customer-lifetime-value)
+- [Stage 6 — Churn Classification](#stage-6--churn-classification)
+- [Stage 7 — Segment Migration](#stage-7--segment-migration)
+- [Stage 8 — Notification Engine](#stage-8--notification-engine)
+- [Stage 9 — Monte Carlo ROI](#stage-9--monte-carlo-roi)
+- [Stage 9b — CLV Temporal Validation](#stage-9b--clv-temporal-validation)
+- [Stage 9c — Churn Threshold Sensitivity](#stage-9c--churn-threshold-sensitivity)
+- [Stage 9d — ROI Assumption Sensitivity](#stage-9d--roi-assumption-sensitivity)
+- [Stage 10 — Streamlit Dashboard](#stage-10--streamlit-dashboard)
 
 ---
 
@@ -1030,12 +1033,12 @@ def preprocess_features(
 
 ---
 
-## Stage 3-4 — Clustering (4 algorithms)
+## Stage 3 — Clustering (6 algorithms)
 
-K-Means (silhouette sweep), DBSCAN (k-distance knee for eps), Gaussian Mixture (BIC selection), and HDBSCAN.
+Six algorithms spanning five families, each with automatic hyper-parameter selection: K-Means (silhouette sweep), DBSCAN (k-distance knee for eps), Gaussian Mixture (BIC selection), HDBSCAN, Agglomerative (Ward linkage), and Spectral.
 
 <details>
-<summary>📄 View code: <code>src/clustering.py</code> (590 lines)</summary>
+<summary>📄 View code: <code>src/clustering.py</code> (679 lines)</summary>
 
 ```python
 """
@@ -1081,13 +1084,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.cluster import DBSCAN, KMeans
+from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans, SpectralClustering
 from sklearn.decomposition import PCA
 from sklearn.metrics import davies_bouldin_score, silhouette_score
 from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors
 
 from src.config import (
+    AGGLOMERATIVE_LINKAGE,
     CLUSTER_PARQUET,
     CUSTOMER_FEATURES_PARQUET,
     DATA_PROCESSED_DIR,
@@ -1105,6 +1109,8 @@ from src.config import (
     OUTPUTS_TABLES_DIR,
     RANDOM_STATE,
     SCALED_FEATURES_PARQUET,
+    SPECTRAL_AFFINITY,
+    SPECTRAL_N_NEIGHBORS,
 )
 from src.preprocessing import FEATURE_COLS
 
@@ -1153,14 +1159,41 @@ def _kmeans_sweep(X: np.ndarray) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _elbow_k(metrics: pd.DataFrame) -> int:
+    """Return the Elbow-method k: the point of maximum curvature on the inertia
+    (WCSS) curve.
+
+    Found geometrically (the Kneedle construction, Satopaa et al. 2011): the k
+    whose normalised inertia point lies farthest from the straight line joining
+    the first and last points of the curve.  Reported alongside the silhouette
+    choice so the number of clusters is justified by **both** the Elbow Method
+    and Silhouette Analysis, as set out in the project scope.
+    """
+    k = metrics["k"].to_numpy(dtype=float)
+    inertia = metrics["inertia"].to_numpy(dtype=float)
+    x = (k - k.min()) / (k.max() - k.min() + 1e-12)
+    y = (inertia - inertia.min()) / (inertia.max() - inertia.min() + 1e-12)
+    dx, dy = x[-1] - x[0], y[-1] - y[0]
+    norm = np.hypot(dx, dy)
+    perp = np.abs(dx * (y - y[0]) - dy * (x - x[0])) / norm
+    return int(k[int(np.argmax(perp))])
+
+
 def _pick_best_k(metrics: pd.DataFrame) -> int:
-    """Return k with highest silhouette, or the KMEANS_BEST_K config override."""
+    """Return k with highest silhouette, or the KMEANS_BEST_K config override.
+
+    The Elbow-method k is also computed and logged for comparison; silhouette
+    remains the decision criterion because it directly measures cluster
+    separation, whereas the elbow only locates a diminishing-returns inflection.
+    """
+    elbow = _elbow_k(metrics)
+    logger.info("Elbow method suggests k = %d (max curvature on inertia/WCSS).", elbow)
     if KMEANS_BEST_K is not None:
         logger.info("Using manually configured k = %d (KMEANS_BEST_K).", KMEANS_BEST_K)
         return KMEANS_BEST_K
     best = int(metrics.loc[metrics["silhouette"].idxmax(), "k"])
-    logger.info("Auto-selected k = %d (silhouette = %.4f).", best,
-                metrics["silhouette"].max())
+    logger.info("Selected k = %d by silhouette (%.4f); elbow method suggested k = %d.",
+                best, metrics["silhouette"].max(), elbow)
     return best
 
 
@@ -1173,11 +1206,15 @@ def _plot_kmeans_selection(metrics: pd.DataFrame, best_k: int) -> None:
         ("silhouette",     "Silhouette score",     "darkorange",  True),
         ("davies_bouldin", "Davies-Bouldin index", "forestgreen", False),
     ]
+    elbow_k = _elbow_k(metrics)
     for ax, (col, ylabel, colour, higher) in zip(axes, panels):
         ax.plot(metrics["k"], metrics[col], marker="o", color=colour,
                 linewidth=2, markersize=6)
         ax.axvline(best_k, color="red", linestyle="--", linewidth=1.5,
-                   label=f"k={best_k} chosen")
+                   label=f"k={best_k} chosen (silhouette)")
+        if col == "inertia":
+            ax.axvline(elbow_k, color="#8172B2", linestyle=":", linewidth=1.6,
+                       label=f"k={elbow_k} (elbow)")
         ax.set_xlabel("k", fontsize=10)
         ax.set_title(f"{ylabel}\n({'higher' if higher else 'lower'} = better)",
                      fontsize=10, fontweight="bold")
@@ -1452,7 +1489,53 @@ def _fit_hdbscan(X: np.ndarray) -> tuple[np.ndarray, object]:
 
 
 # ===========================================================================
-# PCA visualisation (2x2 grid — all four algorithms)
+# Agglomerative (hierarchical) & Spectral clustering
+# ===========================================================================
+
+def _fit_agglomerative(X: np.ndarray, k: int) -> tuple[np.ndarray, AgglomerativeClustering]:
+    """Fit Agglomerative (hierarchical, Ward-linkage) clustering with k clusters.
+
+    A bottom-up hierarchical method: every point starts as its own cluster and
+    the closest pairs are merged until k remain.  Ward linkage minimises the
+    increase in within-cluster variance at each merge, favouring compact,
+    balanced clusters — a useful contrast to the centroid (K-Means), density
+    (DBSCAN/HDBSCAN) and probabilistic (GMM) families.  k is shared with K-Means
+    so the comparison holds the cluster count constant.
+    """
+    logger.info("Fitting Agglomerative clustering (linkage=%s, k=%d).",
+                AGGLOMERATIVE_LINKAGE, k)
+    model = AgglomerativeClustering(n_clusters=k, linkage=AGGLOMERATIVE_LINKAGE)
+    labels = model.fit_predict(X)
+    logger.info("Agglomerative silhouette = %.4f",
+                silhouette_score(X, labels, sample_size=min(3000, len(X)),
+                                 random_state=RANDOM_STATE))
+    return labels, model
+
+
+def _fit_spectral(X: np.ndarray, k: int) -> tuple[np.ndarray, SpectralClustering]:
+    """Fit Spectral clustering with k clusters.
+
+    Spectral clustering embeds the data using the eigenvectors of a similarity-
+    graph Laplacian and clusters that embedding, letting it separate non-convex
+    / manifold structure that centroid methods cannot.  A sparse
+    ``nearest_neighbors`` affinity keeps it tractable at n ~ 6k.
+    """
+    logger.info("Fitting Spectral clustering (affinity=%s, k=%d).",
+                SPECTRAL_AFFINITY, k)
+    model = SpectralClustering(
+        n_clusters=k, affinity=SPECTRAL_AFFINITY,
+        n_neighbors=SPECTRAL_N_NEIGHBORS, assign_labels="kmeans",
+        random_state=RANDOM_STATE,
+    )
+    labels = model.fit_predict(X)
+    logger.info("Spectral silhouette = %.4f",
+                silhouette_score(X, labels, sample_size=min(3000, len(X)),
+                                 random_state=RANDOM_STATE))
+    return labels, model
+
+
+# ===========================================================================
+# PCA visualisation (grid — all algorithms)
 # ===========================================================================
 
 def _plot_pca_all(
@@ -1479,7 +1562,13 @@ def _plot_pca_all(
     ev = pca.explained_variance_ratio_
     logger.info("PCA: PC1=%.1f%%, PC2=%.1f%% explained.", ev[0]*100, ev[1]*100)
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    n_algos = len(all_labels)
+    ncols = 2
+    nrows = (n_algos + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 5 * nrows))
+    axes = np.atleast_1d(axes).flatten()
+    for extra_ax in axes[n_algos:]:  # hide unused cell(s) if the count is odd
+        extra_ax.set_visible(False)
     fig.suptitle(
         f"All-algorithm PCA projection\n"
         f"PC1 {ev[0]*100:.1f}% + PC2 {ev[1]*100:.1f}% = "
@@ -1487,7 +1576,7 @@ def _plot_pca_all(
         fontsize=12, fontweight="bold",
     )
 
-    for ax, (algo, labels) in zip(axes.flat, all_labels.items()):
+    for ax, (algo, labels) in zip(axes, all_labels.items()):
         unique = sorted(np.unique(labels))
         n_real = len([c for c in unique if c != -1])
         ax.set_title(f"{algo}  ({n_real} clusters)", fontsize=11,
@@ -1583,12 +1672,18 @@ def run_all_clustering(X: np.ndarray | None = None) -> dict:
     # ── HDBSCAN ───────────────────────────────────────────────────────────
     hdb_labels, hdb_model = _fit_hdbscan(X)
 
-    # ── PCA (2x2) ─────────────────────────────────────────────────────────
+    # ── Agglomerative (Ward) & Spectral ───────────────────────────────────
+    agg_labels, agg_model = _fit_agglomerative(X, best_k)
+    spec_labels, spec_model = _fit_spectral(X, best_k)
+
+    # ── PCA grid (all algorithms) ─────────────────────────────────────────
     all_labels = {
-        "K-Means":  km_labels,
-        "DBSCAN":   db_labels,
-        "GMM":      gmm_labels,
-        "HDBSCAN":  hdb_labels,
+        "K-Means":        km_labels,
+        "DBSCAN":         db_labels,
+        "GMM":            gmm_labels,
+        "HDBSCAN":        hdb_labels,
+        "Agglomerative":  agg_labels,
+        "Spectral":       spec_labels,
     }
     _plot_pca_all(X, all_labels)
 
@@ -1599,6 +1694,8 @@ def run_all_clustering(X: np.ndarray | None = None) -> dict:
         "DBSCAN_Cluster": db_labels,
         "GMM_Cluster":    gmm_labels,
         "HDBSCAN_Cluster": hdb_labels,
+        "Agglomerative_Cluster": agg_labels,
+        "Spectral_Cluster":      spec_labels,
     })
     features_df = pd.read_parquet(CUSTOMER_FEATURES_PARQUET)
     cluster_df = cluster_df.merge(features_df, on="Customer ID", how="left")
@@ -1613,20 +1710,15 @@ def run_all_clustering(X: np.ndarray | None = None) -> dict:
         logger.info("%s: %s", algo, "  ".join(parts))
 
     return {
-        "kmeans":       {"labels": km_labels,  "model": km_model},
-        "dbscan":       {"labels": db_labels,  "model": db_model, "eps": db_eps},
-        "gmm":          {"labels": gmm_labels, "model": gmm_model},
-        "hdbscan":      {"labels": hdb_labels, "model": hdb_model},
-        "customer_ids": customer_ids,
-        "cluster_df":   cluster_df,
+        "kmeans":        {"labels": km_labels,   "model": km_model},
+        "dbscan":        {"labels": db_labels,   "model": db_model, "eps": db_eps},
+        "gmm":           {"labels": gmm_labels,  "model": gmm_model},
+        "hdbscan":       {"labels": hdb_labels,  "model": hdb_model},
+        "agglomerative": {"labels": agg_labels,  "model": agg_model},
+        "spectral":      {"labels": spec_labels, "model": spec_model},
+        "customer_ids":  customer_ids,
+        "cluster_df":    cluster_df,
     }
-
-
-# Backward-compatible alias kept so any cached imports still work.
-def run_clustering(*args, **kwargs) -> pd.DataFrame:
-    """Alias for run_all_clustering(); returns cluster_df for compatibility."""
-    result = run_all_clustering(*args, **kwargs)
-    return result["cluster_df"]
 
 ```
 
@@ -1648,6 +1740,20 @@ def run_clustering(*args, **kwargs) -> pd.DataFrame:
 | 9 | 10569.34 | 0.2253 | 1.2927 |
 | 10 | 10022.32 | 0.2257 | 1.2896 |
 
+*Gmm Bic*
+
+| n | bic | aic |
+| --- | --- | --- |
+| 2 | -9649.05 | -10123.26 |
+| 3 | -27076.26 | -27790.91 |
+| 4 | -36875.97 | -37831.06 |
+| 5 | -48105.04 | -49300.58 |
+| 6 | -61814.75 | -63250.73 |
+| 7 | -70543.98 | -72220.4 |
+| 8 | -78555.31 | -80472.17 |
+| 9 | -81072.44 | -83229.74 |
+| 10 | -81359.69 | -83757.44 |
+
 
 ![Kmeans Selection](figures/kmeans_selection.png)
 
@@ -1665,10 +1771,10 @@ def run_clustering(*args, **kwargs) -> pd.DataFrame:
 
 ## Stage 3b — Validation & Stability
 
-Internal metrics (Silhouette, Davies-Bouldin, Calinski-Harabasz) and bootstrap ARI stability across 50 resamples; the best algorithm is selected by a transparent rule (noise filter, ARI >= 0.70, then highest silhouette).
+Internal metrics (Silhouette, Davies-Bouldin, Calinski-Harabasz) and bootstrap ARI stability across 50 resamples, for all six algorithms; the operational segmentation is selected by a transparent, pre-declared rule (noise filter, ARI >= 0.70, then highest silhouette) — HDBSCAN wins on this data.
 
 <details>
-<summary>📄 View code: <code>src/validation.py</code> (641 lines)</summary>
+<summary>📄 View code: <code>src/validation.py</code> (695 lines)</summary>
 
 ```python
 """
@@ -1769,7 +1875,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.cluster import DBSCAN, KMeans
+from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans, SpectralClustering
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -1779,11 +1885,11 @@ from sklearn.metrics import (
 )
 
 from src.config import (
+    AGGLOMERATIVE_LINKAGE,
     ARI_STABILITY_THRESHOLD,
     CLUSTER_PARQUET,
     DBSCAN_EPS,
     DBSCAN_MIN_SAMPLES,
-    GMM_BEST_N,
     HDBSCAN_MIN_CLUSTER_SIZE,
     HDBSCAN_MIN_SAMPLES,
     MAX_HDBSCAN_NOISE_FRACTION,
@@ -1792,12 +1898,15 @@ from src.config import (
     OUTPUTS_TABLES_DIR,
     RANDOM_STATE,
     SCALED_FEATURES_PARQUET,
+    SPECTRAL_AFFINITY,
+    SPECTRAL_N_NEIGHBORS,
 )
 from src.preprocessing import FEATURE_COLS
 
 logger = logging.getLogger(__name__)
 
 VALIDATION_CSV = OUTPUTS_TABLES_DIR / "cluster_validation.csv"
+CLUSTER_RANKING_CSV = OUTPUTS_TABLES_DIR / "cluster_ranking.csv"
 STABILITY_PNG = OUTPUTS_FIGURES_DIR / "stability_ari.png"
 
 
@@ -1852,7 +1961,6 @@ def _compute_internal_metrics(
     """
     is_noise = labels == -1
     noise_fraction = float(is_noise.mean())
-    n_all = len(labels)
 
     # Restrict metrics to non-noise points.
     mask = ~is_noise
@@ -1983,6 +2091,20 @@ def _one_bootstrap_round(
         boot_labels = m.fit_predict(X[uid])
         return adjusted_rand_score(ref[uid], boot_labels)
 
+    if algo == "Agglomerative":
+        k = params["k"]
+        m = AgglomerativeClustering(n_clusters=k, linkage=AGGLOMERATIVE_LINKAGE)
+        boot_labels = m.fit_predict(X[uid])
+        return adjusted_rand_score(ref[uid], boot_labels)
+
+    if algo == "Spectral":
+        k = params["k"]
+        m = SpectralClustering(n_clusters=k, affinity=SPECTRAL_AFFINITY,
+                               n_neighbors=SPECTRAL_N_NEIGHBORS,
+                               assign_labels="kmeans", random_state=seed)
+        boot_labels = m.fit_predict(X[uid])
+        return adjusted_rand_score(ref[uid], boot_labels)
+
     raise ValueError(f"Unknown algorithm: {algo}")
 
 
@@ -2047,6 +2169,31 @@ def _summarise_stability(ari_scores: dict[str, list[float]]) -> pd.DataFrame:
     return df
 
 
+def _rank_algorithms(metrics_df: pd.DataFrame, stability_df: pd.DataFrame) -> pd.DataFrame:
+    """Rank algorithms across all internal + stability metrics into a mean rank.
+
+    Combines Silhouette (higher better), Davies-Bouldin (lower better),
+    Calinski-Harabasz (higher better) and bootstrap ARI (higher better) into a
+    single 'who wins overall' table.  Algorithms with undefined metrics (e.g.
+    DBSCAN with one cluster) are ranked last on those metrics.
+    """
+    combined = metrics_df.join(stability_df, how="inner")
+    specs = {
+        "silhouette": False,         # higher better
+        "davies_bouldin": True,      # lower better
+        "calinski_harabasz": False,  # higher better
+        "ARI_mean": False,           # higher better
+    }
+    ranks = pd.DataFrame(index=combined.index)
+    for col, ascending in specs.items():
+        ranks[f"{col}_rank"] = combined[col].rank(
+            ascending=ascending, method="min", na_option="bottom")
+    ranks["mean_rank"] = ranks.mean(axis=1).round(2)
+    ranks = ranks.sort_values("mean_rank")
+    ranks["overall_rank"] = range(1, len(ranks) + 1)
+    return ranks
+
+
 # ---------------------------------------------------------------------------
 # Visualisation
 # ---------------------------------------------------------------------------
@@ -2067,8 +2214,9 @@ def _plot_stability_boxplot(ari_scores: dict[str, list[float]]) -> None:
 
     labels = list(ari_scores.keys())
     data = [ari_scores[k] for k in labels]
-    _palette = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
-    colours = _palette[: len(labels)]
+    _palette = ["#4C72B0", "#DD8452", "#55A868", "#C44E52",
+                "#8172B3", "#937860", "#DA8BC3", "#8C8C8C"]
+    colours = [_palette[i % len(_palette)] for i in range(len(labels))]
 
     bp = ax.boxplot(
         data,
@@ -2264,6 +2412,8 @@ def run_validation(
         "DBSCAN":  "DBSCAN_Cluster",
         "GMM":     "GMM_Cluster",
         "HDBSCAN": "HDBSCAN_Cluster",
+        "Agglomerative": "Agglomerative_Cluster",
+        "Spectral":      "Spectral_Cluster",
     }
     if labels_dict is None:
         logger.info("Loading cluster labels from %s", CLUSTER_PARQUET)
@@ -2285,6 +2435,10 @@ def run_validation(
         if "DBSCAN" in labels_dict:
             _eps = DBSCAN_EPS if DBSCAN_EPS is not None else 0.5
             algo_params["DBSCAN"] = {"eps": _eps}
+        if "Agglomerative" in labels_dict:
+            algo_params["Agglomerative"] = {"k": int(len(np.unique(labels_dict["Agglomerative"])))}
+        if "Spectral" in labels_dict:
+            algo_params["Spectral"] = {"k": int(len(np.unique(labels_dict["Spectral"])))}
 
     logger.info(
         "Validating %d customers across %d algorithms: %s",
@@ -2301,6 +2455,12 @@ def run_validation(
     ari_scores = _run_stability_analysis(X, labels_dict, algo_params)
     stability_df = _summarise_stability(ari_scores)
     _plot_stability_boxplot(ari_scores)
+
+    # ── Overall ranking across all metrics ─────────────────────────────────
+    ranking = _rank_algorithms(metrics_df, stability_df)
+    ranking.to_csv(CLUSTER_RANKING_CSV)
+    logger.info("Algorithm ranking saved to %s\n%s",
+                CLUSTER_RANKING_CSV, ranking.to_string())
 
     # ── Algorithm selection ────────────────────────────────────────────────
     best = select_best_algorithm(metrics_df, stability_df)
@@ -2326,6 +2486,19 @@ def run_validation(
 | DBSCAN | 1 | 0.0265 |  |  |  |
 | GMM | 10 | 0.0 | 0.0809 | 3.8093 | 989.57 |
 | HDBSCAN | 2 | 0.1895 | 0.4157 | 0.89 | 4007.05 |
+| Agglomerative | 2 | 0.0 | 0.3446 | 1.1015 | 3187.93 |
+| Spectral | 2 | 0.0 | 0.3658 | 0.9842 | 3587.46 |
+
+*Cluster Ranking*
+
+| Algorithm | silhouette_rank | davies_bouldin_rank | calinski_harabasz_rank | ARI_mean_rank | mean_rank | overall_rank |
+| --- | --- | --- | --- | --- | --- | --- |
+| HDBSCAN | 1.0 | 1.0 | 2.0 | 3.0 | 1.75 | 1 |
+| K-Means | 2.0 | 3.0 | 1.0 | 2.0 | 2.0 | 2 |
+| Spectral | 3.0 | 2.0 | 3.0 | 1.0 | 2.25 | 3 |
+| Agglomerative | 4.0 | 4.0 | 4.0 | 4.0 | 4.0 | 4 |
+| GMM | 5.0 | 5.0 | 5.0 | 5.0 | 5.0 | 5 |
+| DBSCAN | 6.0 | 6.0 | 6.0 | 6.0 | 6.0 | 6 |
 
 
 ![Stability Ari](figures/stability_ari.png)
@@ -2333,12 +2506,12 @@ def run_validation(
 
 ---
 
-## Stage 6 — Segment Profiling
+## Stage 4 — Segment Profiling
 
 Per-segment un-scaled feature means with rule-based marketing names (Champions, Loyal, At-Risk, Lost, ...), shown as a heatmap and radar.
 
 <details>
-<summary>📄 View code: <code>src/profiling.py</code> (328 lines)</summary>
+<summary>📄 View code: <code>src/profiling.py</code> (349 lines)</summary>
 
 ```python
 """
@@ -2385,6 +2558,8 @@ _LABEL_COL: dict[str, str] = {
     "K-Means":  "KMeans_Cluster",
     "GMM":      "GMM_Cluster",
     "DBSCAN":   "DBSCAN_Cluster",
+    "Agglomerative": "Agglomerative_Cluster",
+    "Spectral":      "Spectral_Cluster",
 }
 
 PROFILE_CSV = OUTPUTS_TABLES_DIR / "segment_profiles.csv"
@@ -2543,12 +2718,26 @@ def _plot_radar(
     profiles: pd.DataFrame,
     names: dict[int, str],
     algo: str,
+    population: pd.DataFrame,
 ) -> None:
     """Save a radar/spider chart comparing non-noise cluster profiles.
 
-    Features are min-max normalised across clusters so every axis shares the
-    same [0, 1] scale.  Recency and AvgInterPurchaseDays are inverted before
-    normalisation (lower = better becomes outward = better).
+    Each feature is expressed as the **percentile rank of the segment's mean
+    within the full customer population** (0-1): an axis value of 0.8 means the
+    segment's average sits above 80% of customers on that feature.  Recency is
+    inverted (lower = better -> outward = better).
+
+    ``AvgInterPurchaseDays`` is intentionally omitted from the radar: a one-time
+    buyer has a value of 0 (no repeat-purchase interval), which under a
+    "lower = better" inversion would wrongly rank them as having excellent
+    cadence.  Frequency already captures purchase intensity without this
+    ambiguity, and the raw value is still shown in the heatmap.
+
+    Percentile rank is used instead of min-max across the cluster means because
+    the latter is degenerate when there are only two non-noise segments (every
+    axis is forced to exactly 0 or 1, collapsing a segment to a single spike).
+    Ranking against the population is robust to the number of clusters and stays
+    interpretable.
     """
     non_noise = profiles[profiles.index != -1].copy()
     if len(non_noise) < 2:
@@ -2558,16 +2747,21 @@ def _plot_radar(
         )
         return
 
-    feat_data = non_noise[FEATURE_COLS].copy()
-    for col in ("Recency", "AvgInterPurchaseDays"):
-        feat_data[col] = feat_data[col].max() - feat_data[col]
-
-    mn, mx = feat_data.min(), feat_data.max()
-    norm = (feat_data - mn) / (mx - mn + 1e-9)
+    # Exclude AvgInterPurchaseDays (see docstring: 0 for one-time buyers would
+    # invert to "best cadence"). The remaining axes are cleanly directional.
+    radar_cols = [c for c in FEATURE_COLS if c != "AvgInterPurchaseDays"]
+    inverted = {"Recency"}  # lower = better
+    norm = pd.DataFrame(index=non_noise.index, columns=radar_cols, dtype=float)
+    for col in radar_cols:
+        pop = population[col].to_numpy()
+        n_pop = len(pop)
+        for cid in non_noise.index:
+            pct = float((pop <= non_noise.loc[cid, col]).sum()) / n_pop
+            norm.loc[cid, col] = (1.0 - pct) if col in inverted else pct
 
     categories = [
         "Recency\n(inv)", "Frequency", "Monetary",
-        "Tenure", "Avg\nOrder\nValue", "Inter-Purchase\n(inv)", "Distinct\nProducts",
+        "Tenure", "Avg\nOrder\nValue", "Distinct\nProducts",
     ]
     N = len(categories)
     angles = [n / N * 2 * np.pi for n in range(N)]
@@ -2593,7 +2787,7 @@ def _plot_radar(
     ax.set_yticks([0.25, 0.5, 0.75, 1.0])
     ax.set_yticklabels(["25%", "50%", "75%", "100%"], fontsize=7, color="#888")
     ax.set_title(
-        f"Cluster Radar Chart — {algo}\n(0-1 normalised; outward = better)",
+        f"Cluster Radar Chart — {algo}\n(axis = percentile vs all customers; outward = better)",
         fontsize=11, fontweight="bold", pad=22,
     )
     ax.legend(loc="upper right", bbox_to_anchor=(1.45, 1.18), fontsize=9)
@@ -2665,7 +2859,7 @@ def profile_clusters(
     logger.info("Segment profiles saved to %s", PROFILE_CSV)
 
     _plot_heatmap(profiles, names, algo)
-    _plot_radar(profiles, names, algo)
+    _plot_radar(profiles, names, algo, population=cluster_df[FEATURE_COLS])
 
     return profiles
 
@@ -2692,12 +2886,12 @@ def profile_clusters(
 
 ---
 
-## Stage 7 — Customer Lifetime Value
+## Stage 5 — Customer Lifetime Value
 
 BG/NBD (purchase process) + Gamma-Gamma (monetary process) to forecast discounted 12-month CLV and 90/180/365-day purchase counts.
 
 <details>
-<summary>📄 View code: <code>src/clv.py</code> (326 lines)</summary>
+<summary>📄 View code: <code>src/clv.py</code> (325 lines)</summary>
 
 ```python
 """
@@ -2743,7 +2937,6 @@ import logging
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 from lifetimes import BetaGeoFitter, GammaGammaFitter
 from lifetimes.utils import summary_data_from_transaction_data
@@ -3051,12 +3244,12 @@ def build_clv(
 
 ---
 
-## Stage 8 — Churn Classification
+## Stage 6 — Churn Classification
 
-Logistic Regression / Random Forest / XGBoost compared by ROC-AUC. Recency is excluded from the features to avoid target leakage (churn is defined from Recency).
+Six classifiers (Logistic Regression, Random Forest, XGBoost, Gradient Boosting, Decision Tree, KNN) compared on ROC-AUC, PR-AUC, F1 and cross-validated ROC-AUC, with pairwise McNemar exact tests for significance. Recency is excluded from the features to avoid target leakage (churn is defined from Recency).
 
 <details>
-<summary>📄 View code: <code>src/churn.py</code> (331 lines)</summary>
+<summary>📄 View code: <code>src/churn.py</code> (445 lines)</summary>
 
 ```python
 """
@@ -3084,6 +3277,9 @@ Models compared
 - Logistic Regression  (linear baseline, class_weight="balanced")
 - Random Forest        (bagged trees, class_weight="balanced")
 - XGBoost              (gradient-boosted trees, scale_pos_weight for imbalance)
+- Gradient Boosting    (sklearn boosted trees)
+- Decision Tree        (single interpretable tree, class_weight="balanced")
+- K-Nearest Neighbours (distance-weighted instance-based baseline)
 
 All three are evaluated on a held-out stratified test split and via stratified
 cross-validation, ranked primarily by ROC-AUC (threshold-independent and
@@ -3107,18 +3303,23 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from scipy.stats import binomtest
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     average_precision_score,
+    confusion_matrix,
     f1_score,
+    precision_recall_curve,
     precision_score,
     recall_score,
     roc_auc_score,
     roc_curve,
 )
 from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeClassifier
 from xgboost import XGBClassifier
 
 from src.config import (
@@ -3147,7 +3348,10 @@ CHURN_FEATURES: list[str] = [
 ]
 
 COMPARISON_CSV = OUTPUTS_TABLES_DIR / "churn_model_comparison.csv"
+MCNEMAR_CSV = OUTPUTS_TABLES_DIR / "churn_mcnemar_pvalues.csv"
+RANKING_CSV = OUTPUTS_TABLES_DIR / "churn_model_ranking.csv"
 ROC_PNG = OUTPUTS_FIGURES_DIR / "churn_roc_curves.png"
+PR_PNG = OUTPUTS_FIGURES_DIR / "churn_pr_curves.png"
 IMPORTANCE_PNG = OUTPUTS_FIGURES_DIR / "churn_feature_importance.png"
 
 
@@ -3172,7 +3376,7 @@ def _build_label(features: pd.DataFrame) -> pd.Series:
 # ---------------------------------------------------------------------------
 
 def _build_models(pos_weight: float) -> dict[str, object]:
-    """Instantiate the three classifiers with imbalance handling.
+    """Instantiate the candidate classifiers with imbalance handling where supported.
 
     Parameters
     ----------
@@ -3195,6 +3399,14 @@ def _build_models(pos_weight: float) -> dict[str, object]:
             colsample_bytree=XGB_COLSAMPLE_BYTREE, scale_pos_weight=pos_weight,
             eval_metric="logloss", random_state=RANDOM_STATE, n_jobs=-1,
         ),
+        "GradientBoosting": GradientBoostingClassifier(
+            n_estimators=200, max_depth=3, learning_rate=0.1,
+            subsample=0.8, random_state=RANDOM_STATE,
+        ),
+        "DecisionTree": DecisionTreeClassifier(
+            max_depth=5, class_weight="balanced", random_state=RANDOM_STATE,
+        ),
+        "KNN": KNeighborsClassifier(n_neighbors=15, weights="distance"),
     }
 
 
@@ -3208,7 +3420,8 @@ def _evaluate(
     X_test: np.ndarray,
     y_train: pd.Series,
     y_test: pd.Series,
-) -> tuple[pd.DataFrame, dict[str, np.ndarray], dict[str, object]]:
+) -> tuple[pd.DataFrame, dict[str, np.ndarray], dict[str, np.ndarray],
+           dict[str, np.ndarray], dict[str, object]]:
     """Fit each model and compute held-out + cross-validated metrics.
 
     Returns
@@ -3223,6 +3436,8 @@ def _evaluate(
                          random_state=RANDOM_STATE)
     rows = []
     roc_data: dict[str, np.ndarray] = {}
+    pr_data: dict[str, np.ndarray] = {}
+    preds: dict[str, np.ndarray] = {}
     fitted: dict[str, object] = {}
 
     for name, model in models.items():
@@ -3231,6 +3446,7 @@ def _evaluate(
 
         proba = model.predict_proba(X_test)[:, 1]
         pred = (proba >= 0.5).astype(int)
+        preds[name] = pred
 
         roc_auc = roc_auc_score(y_test, proba)
         pr_auc = average_precision_score(y_test, proba)
@@ -3243,6 +3459,9 @@ def _evaluate(
 
         fpr, tpr, _ = roc_curve(y_test, proba)
         roc_data[name] = (fpr, tpr)
+        prec_curve, rec_curve, _ = precision_recall_curve(y_test, proba)
+        pr_data[name] = (rec_curve, prec_curve)
+        tn, fp, fn, tp = confusion_matrix(y_test, pred, labels=[0, 1]).ravel()
 
         rows.append({
             "Model": name,
@@ -3253,6 +3472,7 @@ def _evaluate(
             "F1": round(f1, 4),
             "CV_ROC_AUC_mean": round(cv_scores.mean(), 4),
             "CV_ROC_AUC_std": round(cv_scores.std(), 4),
+            "TN": int(tn), "FP": int(fp), "FN": int(fn), "TP": int(tp),
         })
         logger.info(
             "%s: ROC-AUC=%.4f PR-AUC=%.4f F1=%.4f CV-AUC=%.4f+/-%.4f",
@@ -3260,7 +3480,56 @@ def _evaluate(
         )
 
     metrics_df = pd.DataFrame(rows).set_index("Model")
-    return metrics_df, roc_data, fitted
+    return metrics_df, roc_data, pr_data, preds, fitted
+
+
+# ---------------------------------------------------------------------------
+# Statistical comparison
+# ---------------------------------------------------------------------------
+
+def _mcnemar_pvalue(a_correct: np.ndarray, b_correct: np.ndarray) -> float:
+    """Exact McNemar p-value for two models' correctness arrays on the same test set."""
+    b = int(np.sum(a_correct & ~b_correct))   # A right, B wrong
+    c = int(np.sum(~a_correct & b_correct))   # A wrong, B right
+    n = b + c
+    if n == 0:
+        return 1.0
+    return float(binomtest(min(b, c), n, p=0.5).pvalue)
+
+
+def _mcnemar_tests(preds: dict[str, np.ndarray], y_test: pd.Series) -> pd.DataFrame:
+    """Pairwise McNemar p-value matrix across all models.
+
+    McNemar's test compares two classifiers on the *same* test samples and asks
+    whether their disagreements are statistically significant.  p < 0.05 means
+    the two models make significantly different errors (one is genuinely better);
+    p >= 0.05 means the score gap between them is not statistically meaningful.
+    """
+    names = list(preds.keys())
+    y = np.asarray(y_test)
+    correct = {nm: (np.asarray(preds[nm]) == y) for nm in names}
+    mat = pd.DataFrame(index=names, columns=names, dtype=float)
+    for a in names:
+        for b in names:
+            mat.loc[a, b] = 1.0 if a == b else _mcnemar_pvalue(correct[a], correct[b])
+    return mat
+
+
+def _rank_models(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    """Rank models on each key metric and combine into a mean overall rank.
+
+    Gives a single 'who wins overall' view across ROC-AUC, PR-AUC, F1 and
+    cross-validated AUC (rank 1 = best on that metric; lowest mean rank = best
+    overall).
+    """
+    higher_better = ["ROC_AUC", "PR_AUC", "F1", "CV_ROC_AUC_mean"]
+    ranks = pd.DataFrame(index=metrics_df.index)
+    for col in higher_better:
+        ranks[f"{col}_rank"] = metrics_df[col].rank(ascending=False, method="min")
+    ranks["mean_rank"] = ranks.mean(axis=1).round(2)
+    ranks = ranks.sort_values("mean_rank")
+    ranks["overall_rank"] = range(1, len(ranks) + 1)
+    return ranks
 
 
 # ---------------------------------------------------------------------------
@@ -3270,11 +3539,11 @@ def _evaluate(
 def _plot_roc(roc_data: dict[str, np.ndarray], metrics_df: pd.DataFrame) -> None:
     """Save overlaid ROC curves for all models with AUC in the legend."""
     fig, ax = plt.subplots(figsize=(7, 6))
-    palette = {"LogisticRegression": "#4C72B0", "RandomForest": "#55A868",
-               "XGBoost": "#C44E52"}
-    for name, (fpr, tpr) in roc_data.items():
+    palette = ["#4C72B0", "#55A868", "#C44E52", "#DD8452",
+               "#8172B3", "#937860", "#DA8BC3", "#8C8C8C"]
+    for i, (name, (fpr, tpr)) in enumerate(roc_data.items()):
         auc = metrics_df.loc[name, "ROC_AUC"]
-        ax.plot(fpr, tpr, linewidth=2, color=palette.get(name, "#333"),
+        ax.plot(fpr, tpr, linewidth=2, color=palette[i % len(palette)],
                 label=f"{name} (AUC = {auc:.3f})")
     ax.plot([0, 1], [0, 1], "--", color="#999", linewidth=1.2, label="Chance")
     ax.set_xlabel("False Positive Rate", fontsize=10)
@@ -3288,6 +3557,34 @@ def _plot_roc(roc_data: dict[str, np.ndarray], metrics_df: pd.DataFrame) -> None
     fig.savefig(ROC_PNG, dpi=150, bbox_inches="tight")
     plt.close(fig)
     logger.info("ROC curves saved to %s", ROC_PNG)
+
+
+def _plot_pr(pr_data: dict[str, np.ndarray], metrics_df: pd.DataFrame) -> None:
+    """Save overlaid precision-recall curves with PR-AUC in the legend.
+
+    Under the strong class imbalance of the churn label (~10% positive), the
+    precision-recall curve is more informative than ROC: it focuses on the
+    minority (churner) class that the campaign actually cares about.
+    """
+    fig, ax = plt.subplots(figsize=(7, 6))
+    palette = ["#4C72B0", "#55A868", "#C44E52", "#DD8452",
+               "#8172B3", "#937860", "#DA8BC3", "#8C8C8C"]
+    for i, (name, (rec_curve, prec_curve)) in enumerate(pr_data.items()):
+        pr_auc = metrics_df.loc[name, "PR_AUC"]
+        ax.plot(rec_curve, prec_curve, linewidth=2, color=palette[i % len(palette)],
+                label=f"{name} (PR-AUC = {pr_auc:.3f})")
+    ax.set_xlabel("Recall", fontsize=10)
+    ax.set_ylabel("Precision", fontsize=10)
+    ax.set_title("Churn model precision-recall curves\n"
+                 "(held-out test set; robust to class imbalance)",
+                 fontsize=11, fontweight="bold")
+    ax.legend(fontsize=9, loc="upper right")
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.tight_layout()
+    OUTPUTS_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(PR_PNG, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("PR curves saved to %s", PR_PNG)
 
 
 def _plot_importance(model: object, model_name: str) -> None:
@@ -3353,7 +3650,7 @@ def run_churn(features: pd.DataFrame | None = None) -> pd.DataFrame:
     pos_weight = float((y_train == 0).sum() / max((y_train == 1).sum(), 1))
     models = _build_models(pos_weight)
 
-    metrics_df, roc_data, fitted = _evaluate(
+    metrics_df, roc_data, pr_data, preds, fitted = _evaluate(
         models, X_train, X_test, y_train, y_test,
     )
 
@@ -3362,6 +3659,15 @@ def run_churn(features: pd.DataFrame | None = None) -> pd.DataFrame:
     logger.info("Model comparison saved to %s\n%s",
                 COMPARISON_CSV, metrics_df.to_string())
 
+    # Statistical comparison: pairwise significance + overall ranking.
+    mcnemar = _mcnemar_tests(preds, y_test)
+    mcnemar.to_csv(MCNEMAR_CSV)
+    logger.info("McNemar pairwise p-values saved to %s\n%s",
+                MCNEMAR_CSV, mcnemar.round(4).to_string())
+    ranking = _rank_models(metrics_df)
+    ranking.to_csv(RANKING_CSV)
+    logger.info("Model ranking saved to %s\n%s", RANKING_CSV, ranking.to_string())
+
     # Best model by held-out ROC-AUC.
     best_name = metrics_df["ROC_AUC"].idxmax()
     best_model = fitted[best_name]
@@ -3369,6 +3675,7 @@ def run_churn(features: pd.DataFrame | None = None) -> pd.DataFrame:
                 best_name, metrics_df.loc[best_name, "ROC_AUC"])
 
     _plot_roc(roc_data, metrics_df)
+    _plot_pr(pr_data, metrics_df)
     # Prefer a tree model for the importance plot if the best is linear.
     imp_name = best_name if hasattr(best_model, "feature_importances_") else "RandomForest"
     _plot_importance(fitted[imp_name], imp_name)
@@ -3398,14 +3705,42 @@ def run_churn(features: pd.DataFrame | None = None) -> pd.DataFrame:
 
 *Churn Model Comparison*
 
-| Model | ROC_AUC | PR_AUC | Precision | Recall | F1 | CV_ROC_AUC_mean | CV_ROC_AUC_std |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| LogisticRegression | 0.8459 | 0.2795 | 0.2296 | 0.8889 | 0.3649 | 0.8459 | 0.0131 |
-| RandomForest | 0.849 | 0.2874 | 0.2708 | 0.7521 | 0.3982 | 0.8424 | 0.0108 |
-| XGBoost | 0.8469 | 0.2972 | 0.2663 | 0.735 | 0.3909 | 0.8398 | 0.0074 |
+| Model | ROC_AUC | PR_AUC | Precision | Recall | F1 | CV_ROC_AUC_mean | CV_ROC_AUC_std | TN | FP | FN | TP |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| LogisticRegression | 0.8459 | 0.2795 | 0.2296 | 0.8889 | 0.3649 | 0.8459 | 0.0131 | 710 | 349 | 13 | 104 |
+| RandomForest | 0.849 | 0.2874 | 0.2708 | 0.7521 | 0.3982 | 0.8424 | 0.0108 | 822 | 237 | 29 | 88 |
+| XGBoost | 0.8469 | 0.2972 | 0.2663 | 0.735 | 0.3909 | 0.8398 | 0.0074 | 822 | 237 | 31 | 86 |
+| GradientBoosting | 0.8461 | 0.2851 | 0.2105 | 0.0342 | 0.0588 | 0.8351 | 0.0078 | 1044 | 15 | 113 | 4 |
+| DecisionTree | 0.828 | 0.2544 | 0.2338 | 0.9231 | 0.3731 | 0.8218 | 0.0212 | 705 | 354 | 9 | 108 |
+| KNN | 0.807 | 0.2483 | 0.2162 | 0.0684 | 0.1039 | 0.8163 | 0.0154 | 1030 | 29 | 109 | 8 |
+
+*Churn Model Ranking*
+
+| Model | ROC_AUC_rank | PR_AUC_rank | F1_rank | CV_ROC_AUC_mean_rank | mean_rank | overall_rank |
+| --- | --- | --- | --- | --- | --- | --- |
+| RandomForest | 1.0 | 2.0 | 1.0 | 2.0 | 1.5 | 1 |
+| XGBoost | 2.0 | 1.0 | 2.0 | 3.0 | 2.0 | 2 |
+| LogisticRegression | 4.0 | 4.0 | 4.0 | 1.0 | 3.25 | 3 |
+| GradientBoosting | 3.0 | 3.0 | 6.0 | 4.0 | 4.0 | 4 |
+| DecisionTree | 5.0 | 5.0 | 3.0 | 5.0 | 4.5 | 5 |
+| KNN | 6.0 | 6.0 | 5.0 | 6.0 | 5.75 | 6 |
+
+*Churn Mcnemar Pvalues*
+
+|  | LogisticRegression | RandomForest | XGBoost | GradientBoosting | DecisionTree | KNN |
+| --- | --- | --- | --- | --- | --- | --- |
+| LogisticRegression | 1.0 | 6.1372914856593e-18 | 2.0804836938185115e-15 | 2.246155470005518e-30 | 1.0 | 3.0829451343212253e-29 |
+| RandomForest | 6.1372914856593e-18 | 1.0 | 0.8776143287523154 | 1.5760330692282133e-15 | 2.6544582333728376e-17 | 2.7001249906849273e-14 |
+| XGBoost | 2.0804836938185115e-15 | 0.8776143287523154 | 1.0 | 5.880112847241611e-16 | 2.1008289315736506e-15 | 8.135221245250658e-15 |
+| GradientBoosting | 2.246155470005518e-30 | 1.5760330692282133e-15 | 5.880112847241611e-16 | 1.0 | 3.981815112332311e-30 | 0.1538599441628321 |
+| DecisionTree | 1.0 | 2.6544582333728376e-17 | 2.1008289315736506e-15 | 3.981815112332311e-30 | 1.0 | 7.643336190566865e-29 |
+| KNN | 3.0829451343212253e-29 | 2.7001249906849273e-14 | 8.135221245250658e-15 | 0.1538599441628321 | 7.643336190566865e-29 | 1.0 |
 
 
 ![Churn Roc Curves](figures/churn_roc_curves.png)
+
+
+![Churn Pr Curves](figures/churn_pr_curves.png)
 
 
 ![Churn Feature Importance](figures/churn_feature_importance.png)
@@ -3413,7 +3748,7 @@ def run_churn(features: pd.DataFrame | None = None) -> pd.DataFrame:
 
 ---
 
-## Stage 9 — Segment Migration
+## Stage 7 — Segment Migration
 
 Year-on-year segment transition matrix over customers present in both years, with retained / lapsed / new cohort sizes.
 
@@ -3700,12 +4035,12 @@ def run_migration(transactions: pd.DataFrame | None = None) -> dict:
 
 ---
 
-## Stage 10 — Notification Engine
+## Stage 8 — Notification Engine
 
 Rule-based campaign engine combining segment, CLV tier, and churn risk into an action / channel / offer / priority per customer; exposes recommend(customer_id).
 
 <details>
-<summary>📄 View code: <code>src/notifications.py</code> (329 lines)</summary>
+<summary>📄 View code: <code>src/notifications.py</code> (377 lines)</summary>
 
 ```python
 """
@@ -3714,7 +4049,9 @@ Phase 10: Rule-based marketing notification engine.
 Turns the analytical outputs of earlier stages into a concrete, per-customer
 marketing action plan.  Each customer is assigned:
 
-- a **segment** (rule-based RFM name, consistent with profiling/migration),
+- a **segment** — the marketing name of the **unsupervised cluster** they were
+  assigned in Stage 3 (``NOTIF_CLUSTER_ALGO``, default HDBSCAN), so the campaign
+  engine is driven by the clustering result, not a separate rule pass,
 - a **value tier** (High / Medium / Low) from their predicted CLV,
 - a **churn-risk band** (High / Medium / Low) from their churn probability,
 
@@ -3744,6 +4081,16 @@ the customer's own average inter-purchase gap, so the message lands *before*
 they would naturally lapse.  One-time buyers (no cadence) fall back to
 ``NOTIF_DEFAULT_CONTACT_DAYS``.
 
+Delivery model
+--------------
+This is a **logic-based automation framework**, not a real-time streaming
+system: :func:`generate_notifications` builds the full plan as a batch, and
+:func:`recommend` exposes the same logic for **on-demand** single-customer
+look-ups (e.g. behind an API endpoint).  Because the rules are deterministic,
+the per-customer recommendation can be (re)computed the moment a customer's
+CLV / churn / cluster inputs change, which is what makes the engine "dynamic"
+without requiring a live event pipeline.
+
 Outputs
 -------
 outputs/tables/notification_plan.csv -- one row per customer with the full plan
@@ -3756,18 +4103,25 @@ import logging
 import pandas as pd
 
 from src.config import (
+    CLUSTER_PARQUET,
     CUSTOMER_CHURN_PARQUET,
     CUSTOMER_CLV_PARQUET,
     NOTIF_CADENCE_FRACTION,
     NOTIF_CHURN_HIGH,
     NOTIF_CHURN_MED,
+    NOTIF_CLUSTER_ALGO,
     NOTIF_CLV_HIGH_Q,
     NOTIF_CLV_LOW_Q,
     NOTIF_DEFAULT_CONTACT_DAYS,
     NOTIFICATION_PLAN_CSV,
     OUTPUTS_TABLES_DIR,
 )
-from src.profiling import _assign_name
+from src.profiling import (
+    FEATURE_COLS,
+    _LABEL_COL,
+    _build_profiles,
+    _name_clusters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3824,30 +4178,57 @@ _SEGMENT_PLAYBOOK: dict[str, dict] = {
     },
 }
 
-_RFM_COLS = ["Recency", "Frequency", "Monetary"]
-
-
 # ---------------------------------------------------------------------------
 # Data assembly
 # ---------------------------------------------------------------------------
 
+def _cluster_segment_names(clusters: pd.DataFrame, label_col: str) -> dict[int, str]:
+    """Map each cluster id to a marketing segment name from its mean RFM profile.
+
+    Reuses the same rule-based namer used to label clusters in profiling, so a
+    cluster whose averaged behaviour looks like "Champions" drives the Champions
+    playbook.  Cluster -1 (HDBSCAN/DBSCAN noise) becomes "Noise / Uncategorised".
+    """
+    profiles = _build_profiles(clusters, label_col)
+    overall = clusters[FEATURE_COLS].mean()
+    return _name_clusters(profiles, overall)
+
+
 def _load_customer_table() -> pd.DataFrame:
-    """Merge CLV and churn artefacts into one per-customer table.
+    """Merge CLV, churn, and unsupervised cluster labels into one table.
 
     The CLV parquet already carries the full feature set (it was built by
-    merging onto customer_features), so it is the base; churn scores are
-    joined on Customer ID.
+    merging onto customer_features), so it is the base; churn scores and the
+    cluster label from the configured clustering algorithm (``NOTIF_CLUSTER_ALGO``)
+    are joined on Customer ID.  Each customer's marketing ``segment`` is the name
+    of *their cluster* (derived from the cluster's mean RFM profile), so the
+    campaign engine is driven by the clustering result rather than a separate
+    per-customer rule pass.
     """
     logger.info("Loading CLV table from %s", CUSTOMER_CLV_PARQUET)
     clv = pd.read_parquet(CUSTOMER_CLV_PARQUET)
     logger.info("Loading churn table from %s", CUSTOMER_CHURN_PARQUET)
     churn = pd.read_parquet(CUSTOMER_CHURN_PARQUET)
+    logger.info("Loading %s cluster labels from %s", NOTIF_CLUSTER_ALGO, CLUSTER_PARQUET)
+    clusters = pd.read_parquet(CLUSTER_PARQUET)
 
     df = clv.merge(
         churn[["Customer ID", "churn_label", "churn_probability"]],
         on="Customer ID", how="left",
     )
-    logger.info("Merged customer table: %d rows, %d columns.", len(df), df.shape[1])
+
+    # Attach each customer's cluster label and its cluster-derived segment name.
+    label_col = _LABEL_COL[NOTIF_CLUSTER_ALGO]
+    cluster_names = _cluster_segment_names(clusters, label_col)
+    df = df.merge(clusters[["Customer ID", label_col]], on="Customer ID", how="left")
+    df["cluster"] = df[label_col]
+    df["segment"] = df["cluster"].map(cluster_names).fillna("Noise / Uncategorised")
+    df = df.drop(columns=[label_col])
+
+    logger.info(
+        "Merged customer table: %d rows. Segments (from %s clusters):\n%s",
+        len(df), NOTIF_CLUSTER_ALGO, df["segment"].value_counts().to_string(),
+    )
     return df
 
 
@@ -3856,11 +4237,13 @@ def _load_customer_table() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def _assign_tiers(df: pd.DataFrame) -> pd.DataFrame:
-    """Add segment, clv_tier, and churn_risk columns in place (returns copy)."""
-    out = df.copy()
+    """Add clv_tier and churn_risk columns (returns copy).
 
-    overall = out[_RFM_COLS].mean()
-    out["segment"] = out.apply(lambda r: _assign_name(r, overall), axis=1)
+    The ``segment`` column is already set in :func:`_load_customer_table` from
+    the customer's cluster, so this step only adds the value and churn-risk
+    bands that modulate each segment's baseline campaign.
+    """
+    out = df.copy()
 
     clv_high = out["clv"].quantile(NOTIF_CLV_HIGH_Q)
     clv_low = out["clv"].quantile(NOTIF_CLV_LOW_Q)
@@ -4027,7 +4410,7 @@ def recommend(customer_id: int, refresh: bool = False) -> dict:
     KeyError
         If the customer ID is not present in the plan.
     """
-    global _PLAN_CACHE
+    # Read-only access to the module cache; no `global` needed here.
     if _PLAN_CACHE is None or refresh:
         generate_notifications()
 
@@ -4047,48 +4430,48 @@ def recommend(customer_id: int, refresh: bool = False) -> dict:
 
 | Customer ID | segment | clv | clv_tier | churn_probability | churn_risk | action | channel | offer | priority | recommended_contact_days |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 16446 | Big Spenders | 323792.48191292223 | High | 0.005334543666553198 | Low | Premium product recommendations | Email + Personal outreach | Concierge / personal-shopper invite | 5 | 61 |
-| 18102 | Champions | 254327.18471303734 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 3 |
-| 14646 | Champions | 218979.69753891928 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 3 |
-| 17450 | Champions | 139434.8716104283 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 5 |
-| 14096 | Champions | 131949.34689618542 | High | 0.11620583365506879 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 3 |
-| 14156 | Champions | 130357.71372415546 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 3 |
-| 14911 | Champions | 122906.71000326314 | High | 0.011990163903594973 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 1 |
-| 12415 | Champions | 81581.89526294038 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 11 |
-| 13694 | Champions | 81462.57065657672 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 3 |
-| 17511 | Champions | 72615.08074401054 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 7 |
-| 16684 | Champions | 62170.97979065735 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 8 |
-| 15061 | Champions | 56394.20120783658 | High | 0.0019074129825975214 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 3 |
-| 17949 | Champions | 48994.21641095206 | High | 0.0015476462088371734 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 4 |
-| 16029 | Champions | 48643.717430497876 | High | 0.0015476462088371734 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 4 |
-| 13089 | Champions | 48593.740648764564 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 2 |
-| 15311 | Champions | 48252.53368981148 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 2 |
-| 12931 | Champions | 38295.61150383079 | High | 0.004548099877885603 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 8 |
-| 14298 | Champions | 37930.547104597455 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 5 |
-| 15769 | Champions | 37021.58265848898 | High | 0.0015476462088371734 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 9 |
-| 14088 | Champions | 36577.469368248196 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 15 |
-| 12536 | Big Spenders | 32276.860813226423 | High | 0.12217901133338564 | Low | Premium product recommendations | Email + Personal outreach | Concierge / personal-shopper invite | 5 | 3 |
-| 13798 | Champions | 31779.23040439666 | High | 0.00035976677376034803 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 4 |
-| 15838 | Champions | 31777.53611491512 | High | 0.004880979542170506 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 13 |
-| 17841 | Champions | 29031.24241901988 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 2 |
-| 16422 | Champions | 27702.51192420157 | High | 0.0019074129825975214 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 4 |
-| 13098 | Champions | 25006.18414981036 | High | 0.00035976677376034803 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 7 |
-| 13081 | Champions | 24426.066547211958 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 15 |
-| 14680 | Champions | 23859.16961538566 | High | 0.0 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 7 |
-| 17389 | Champions | 23759.53375264876 | High | 0.0015476462088371734 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 7 |
-| 16333 | Champions | 23732.255434130595 | High | 0.0015476462088371734 | Low | VIP loyalty reward + early access | Email + App push | Exclusive previews, loyalty points bonus | 5 | 8 |
+| 15398 | General Customers | 2548.904275778772 | High | 0.5608684448611545 | High | Priority retention intervention | Email + SMS + Personal outreach | High-value personalised retention offer | 5 | 19 |
+| 12689 | General Customers | 1976.5966821729266 | High | 0.6201253026410896 | High | Priority retention intervention | Email + SMS + Personal outreach | High-value personalised retention offer | 5 | 30 |
+| 14418 | General Customers | 4361.16312497984 | High | 0.31593476205384957 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 21 |
+| 13644 | General Customers | 4040.009437770767 | High | 0.2816039588563262 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 13 |
+| 12518 | General Customers | 3717.406321380803 | High | 0.2978420623800354 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 13 |
+| 13994 | General Customers | 3420.5144422920903 | High | 0.3366429732058373 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 14 |
+| 15977 | General Customers | 3394.722881913176 | High | 0.3016535927671112 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 6 |
+| 14387 | General Customers | 3064.5053455086004 | High | 0.2565119613870219 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 15 |
+| 12646 | Noise / Uncategorised | 2783.293767684486 | High | 0.5777489815743342 | High | Priority retention intervention | Email + SMS + Personal outreach | High-value personalised retention offer | 4 | 13 |
+| 13437 | General Customers | 2780.3852272638796 | High | 0.311892388426449 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 15 |
+| 18180 | General Customers | 2736.899589317619 | High | 0.26917453071415487 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 14 |
+| 13808 | General Customers | 2735.01143288285 | High | 0.2626967963162574 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 11 |
+| 12630 | General Customers | 2702.903960618956 | High | 0.48520230289948935 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 10 |
+| 17481 | General Customers | 2467.317086531534 | High | 0.31348455413166687 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 14 |
+| 13726 | General Customers | 2406.7107469236607 | High | 0.3764880253487899 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 18 |
+| 16066 | General Customers | 2384.230690100537 | High | 0.3399797241834302 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 13 |
+| 18204 | General Customers | 2284.7536176069743 | High | 0.2656143927401954 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 24 |
+| 15089 | General Customers | 2275.1893812347034 | High | 0.4066752235090416 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 12 |
+| 12610 | General Customers | 2249.179234810112 | High | 0.3113708907278065 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 12 |
+| 12488 | General Customers | 2245.6515202734954 | High | 0.2507236414971809 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 13 |
+| 14511 | General Customers | 2233.712711890071 | High | 0.44784239020435623 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 15 |
+| 17073 | General Customers | 2220.46737068432 | High | 0.3282906870560899 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 14 |
+| 14937 | General Customers | 2212.075351858807 | High | 0.3066754885067213 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 15 |
+| 18167 | General Customers | 2185.1080189889526 | High | 0.2832205916577305 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 16 |
+| 13860 | General Customers | 2184.273583068111 | High | 0.27620753115576024 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 10 |
+| 12572 | General Customers | 2171.5134764005984 | High | 0.40122782513558986 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 13 |
+| 17653 | General Customers | 2163.303934944542 | High | 0.3241605169051562 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 12 |
+| 16102 | General Customers | 2149.074147067953 | High | 0.42421659000372 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 17 |
+| 14116 | General Customers | 2134.045559455373 | High | 0.40454089239316743 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 12 |
+| 13159 | General Customers | 2117.927366920304 | High | 0.3979717398193236 | Medium | Engagement / category promotion | Email | Seasonal category promotion | 4 | 16 |
 
 _Showing first 30 of 5,878 rows._
 
 
 ---
 
-## Stage 11 — Monte Carlo ROI
+## Stage 9 — Monte Carlo ROI
 
-10,000-iteration simulation of campaign ROI with Beta response priors, Binomial conversions, and a margin/discount adjustment; reports mean ROI, a 95% credible interval, and P(ROI > 0).
+10,000-iteration simulation of campaign ROI with Beta response priors, Binomial conversions, and a margin/discount adjustment; reports mean ROI, a 95% credible interval, P(ROI > 0), and the profit uplift over an untargeted blanket-marketing baseline.
 
 <details>
-<summary>📄 View code: <code>src/roi.py</code> (302 lines)</summary>
+<summary>📄 View code: <code>src/roi.py</code> (386 lines)</summary>
 
 ```python
 """
@@ -4128,6 +4511,14 @@ Per iteration the totals are aggregated across all groups and:
 The output reports the mean/median ROI, a central ``ROI_CI_LEVEL`` credible
 interval, the probability of a positive ROI, and expected net profit.
 
+Uplift versus static marketing
+------------------------------
+The same machinery is also run on a **static "blanket" baseline** -- every
+customer contacted once on one channel with one generic offer at a low
+untargeted response rate -- and the summary reports the ROI/profit *uplift* of
+the targeted, cluster-based plan over it.  This is the "versus static methods"
+comparison the project's scope calls for.
+
 Outputs
 -------
 outputs/tables/roi_simulation_summary.csv -- headline statistics
@@ -4157,6 +4548,8 @@ from src.config import (
     ROI_OFFER_DISCOUNT,
     ROI_RESPONSE_CONCENTRATION,
     ROI_REVENUE_NOISE_SD,
+    ROI_STATIC_CHANNEL,
+    ROI_STATIC_RESPONSE,
 )
 
 logger = logging.getLogger(__name__)
@@ -4220,6 +4613,36 @@ def _build_campaign_table(
     return grp
 
 
+def _build_static_baseline(plan: pd.DataFrame, clv: pd.DataFrame) -> pd.DataFrame:
+    """Build the single-row 'blanket marketing' baseline campaign table.
+
+    Represents untargeted, static-profiling marketing: every customer is
+    contacted once on a single channel (``ROI_STATIC_CHANNEL``) with one generic
+    low-response offer (``ROI_STATIC_RESPONSE``).  Simulating this alongside the
+    targeted plan lets the project quantify the *uplift* of cluster-based
+    targeting over a one-size-fits-all campaign -- the comparison "versus static
+    methods" promised in the scope.
+    """
+    merged = plan.merge(
+        clv[["Customer ID", "AvgOrderValue"]], on="Customer ID", how="left",
+    )
+    n = int(len(merged))
+    aov = float(merged["AvgOrderValue"].mean())
+    cost_per_contact = _channel_cost(ROI_STATIC_CHANNEL)
+    grp = pd.DataFrame(
+        {
+            "n_customers": [n],
+            "mean_aov": [aov],
+            "cost_per_contact": [cost_per_contact],
+            "response_prior": [ROI_STATIC_RESPONSE],
+            "total_cost": [n * cost_per_contact],
+        },
+        index=pd.Index(["Blanket (static) campaign"], name="action"),
+    )
+    logger.info("Static baseline campaign:\n%s", grp.round(3).to_string())
+    return grp
+
+
 # ---------------------------------------------------------------------------
 # Simulation
 # ---------------------------------------------------------------------------
@@ -4272,8 +4695,16 @@ def _simulate(campaigns: pd.DataFrame) -> dict[str, np.ndarray]:
     }
 
 
-def _summarise(sim: dict[str, np.ndarray]) -> pd.DataFrame:
-    """Reduce the simulation arrays to a one-column summary table."""
+def _summarise(
+    sim: dict[str, np.ndarray],
+    baseline_sim: dict[str, np.ndarray] | None = None,
+) -> pd.DataFrame:
+    """Reduce the simulation arrays to a one-column summary table.
+
+    When ``baseline_sim`` (the static blanket campaign) is supplied, the table
+    also reports the static baseline's ROI/profit and the **uplift** of the
+    targeted plan over it -- the headline "versus static methods" figure.
+    """
     roi = sim["roi"]
     profit = sim["profit"]
     revenue = sim["revenue"]
@@ -4296,6 +4727,21 @@ def _summarise(sim: dict[str, np.ndarray]) -> pd.DataFrame:
         "prob_positive_roi": round(float((roi > 0).mean()), 4),
         "prob_roi_gt_1": round(float((roi > 1.0).mean()), 4),
     }
+
+    if baseline_sim is not None:
+        b_roi = baseline_sim["roi"]
+        b_profit = baseline_sim["profit"]
+        b_mean_profit = float(b_profit.mean())
+        stats["static_total_cost"] = round(float(baseline_sim["cost"][0]), 2)
+        stats["static_mean_profit"] = round(b_mean_profit, 2)
+        stats["static_mean_roi"] = round(float(b_roi.mean()), 4)
+        stats["roi_uplift_vs_static"] = round(float(roi.mean() - b_roi.mean()), 4)
+        stats["profit_uplift_vs_static"] = round(float(profit.mean() - b_mean_profit), 2)
+        stats["profit_uplift_pct_vs_static"] = (
+            round((profit.mean() - b_mean_profit) / abs(b_mean_profit) * 100, 1)
+            if b_mean_profit != 0 else float("nan")
+        )
+
     df = pd.DataFrame.from_dict(stats, orient="index", columns=["value"])
     logger.info("ROI simulation summary:\n%s", df.to_string())
     return df
@@ -4305,8 +4751,15 @@ def _summarise(sim: dict[str, np.ndarray]) -> pd.DataFrame:
 # Visualisation
 # ---------------------------------------------------------------------------
 
-def _plot_distribution(sim: dict[str, np.ndarray]) -> None:
-    """Save a 2-panel histogram: ROI distribution and net-profit distribution."""
+def _plot_distribution(
+    sim: dict[str, np.ndarray],
+    baseline_sim: dict[str, np.ndarray] | None = None,
+) -> None:
+    """Save a 2-panel histogram: ROI distribution and net-profit distribution.
+
+    If ``baseline_sim`` is supplied, the static blanket campaign's mean ROI and
+    mean profit are overlaid so the uplift of targeting is visible at a glance.
+    """
     roi = sim["roi"]
     profit = sim["profit"]
     lo_q = (1.0 - ROI_CI_LEVEL) / 2.0
@@ -4317,11 +4770,15 @@ def _plot_distribution(sim: dict[str, np.ndarray]) -> None:
 
     axes[0].hist(roi, bins=60, color="#4C72B0", edgecolor="white", alpha=0.85)
     axes[0].axvline(roi.mean(), color="#C44E52", linestyle="-", linewidth=1.8,
-                    label=f"Mean ROI = {roi.mean():.2f}")
+                    label=f"Targeted mean ROI = {roi.mean():.2f}")
     axes[0].axvline(roi_lo, color="#333", linestyle="--", linewidth=1.3,
                     label=f"{int(ROI_CI_LEVEL*100)}% CI = [{roi_lo:.2f}, {roi_hi:.2f}]")
     axes[0].axvline(roi_hi, color="#333", linestyle="--", linewidth=1.3)
     axes[0].axvline(0, color="grey", linewidth=1.0)
+    if baseline_sim is not None:
+        b_roi_mean = float(baseline_sim["roi"].mean())
+        axes[0].axvline(b_roi_mean, color="#8172B2", linestyle=":", linewidth=2.0,
+                        label=f"Static baseline ROI = {b_roi_mean:.2f}")
     axes[0].set_xlabel("Campaign ROI  =  (revenue - cost) / cost", fontsize=10)
     axes[0].set_ylabel("Simulation count", fontsize=10)
     axes[0].set_title(f"ROI distribution\n({ROI_N_SIMULATIONS:,} Monte Carlo runs)",
@@ -4331,8 +4788,12 @@ def _plot_distribution(sim: dict[str, np.ndarray]) -> None:
 
     axes[1].hist(profit, bins=60, color="#55A868", edgecolor="white", alpha=0.85)
     axes[1].axvline(profit.mean(), color="#C44E52", linestyle="-", linewidth=1.8,
-                    label=f"Mean profit = {profit.mean():,.0f}")
+                    label=f"Targeted mean profit = {profit.mean():,.0f}")
     axes[1].axvline(0, color="grey", linewidth=1.0)
+    if baseline_sim is not None:
+        b_profit_mean = float(baseline_sim["profit"].mean())
+        axes[1].axvline(b_profit_mean, color="#8172B2", linestyle=":", linewidth=2.0,
+                        label=f"Static baseline profit = {b_profit_mean:,.0f}")
     axes[1].set_xlabel("Net profit (revenue - cost)", fontsize=10)
     axes[1].set_ylabel("Simulation count", fontsize=10)
     axes[1].set_title("Net-profit distribution", fontsize=11, fontweight="bold")
@@ -4384,13 +4845,19 @@ def run_roi_simulation(
 
     campaigns = _build_campaign_table(plan, clv)
     sim = _simulate(campaigns)
-    summary = _summarise(sim)
+
+    # Static "blanket marketing" baseline, simulated the same way, so we can
+    # report the uplift of the targeted, cluster-based plan over it.
+    baseline = _build_static_baseline(plan, clv)
+    baseline_sim = _simulate(baseline)
+
+    summary = _summarise(sim, baseline_sim)
 
     OUTPUTS_TABLES_DIR.mkdir(parents=True, exist_ok=True)
     summary.to_csv(ROI_SUMMARY_CSV)
     logger.info("ROI summary saved to %s", ROI_SUMMARY_CSV)
 
-    _plot_distribution(sim)
+    _plot_distribution(sim, baseline_sim)
     return summary
 
 ```
@@ -4404,16 +4871,22 @@ def run_roi_simulation(
 |  | value |
 | --- | --- |
 | n_simulations | 10000.0 |
-| total_cost | 838.44 |
-| mean_gross_revenue | 254465.21 |
-| mean_contribution | 50893.04 |
-| mean_profit | 50054.6 |
-| mean_roi | 59.6997 |
-| median_roi | 59.3013 |
-| roi_ci_low_95 | 44.4537 |
-| roi_ci_high_95 | 77.3235 |
+| total_cost | 623.5 |
+| mean_gross_revenue | 122879.1 |
+| mean_contribution | 24575.82 |
+| mean_profit | 23952.32 |
+| mean_roi | 38.4159 |
+| median_roi | 37.3549 |
+| roi_ci_low_95 | 21.8243 |
+| roi_ci_high_95 | 60.9255 |
 | prob_positive_roi | 1.0 |
 | prob_roi_gt_1 | 1.0 |
+| static_total_cost | 293.9 |
+| static_mean_profit | 8927.22 |
+| static_mean_roi | 30.375 |
+| roi_uplift_vs_static | 8.0409 |
+| profit_uplift_vs_static | 15025.1 |
+| profit_uplift_pct_vs_static | 168.3 |
 
 
 ![Roi Distribution](figures/roi_distribution.png)
@@ -4421,12 +4894,704 @@ def run_roi_simulation(
 
 ---
 
-## Stage 12 — Streamlit Dashboard
+## Stage 9b — CLV Temporal Validation
+
+Calibration/holdout split of the BG/NBD model: fit on year 1, score against unseen year-2 purchases, reporting MAE, RMSE, Pearson r and aggregate bias.
+
+<details>
+<summary>📄 View code: <code>src/clv_validation.py</code> (249 lines)</summary>
+
+```python
+"""
+Temporal (calibration / holdout) validation of the BG/NBD purchase model.
+
+Phase 7 fits BG/NBD + Gamma-Gamma on the *full* two-year window, which leaves
+the CLV forecasts without an out-of-sample check.  This module closes that gap
+with the standard Fader-Hardie calibration/holdout procedure:
+
+1. Split the transaction history at ``max(InvoiceDate) - CLV_HOLDOUT_DAYS``:
+   everything before is the **calibration** period, everything after the
+   **holdout** period (unseen by the model).
+2. Fit BG/NBD on calibration-period frequency/recency/T only.
+3. Predict each customer's expected number of purchases during the holdout
+   window and compare against the purchases they *actually* made.
+
+Reported metrics
+----------------
+- MAE / RMSE of per-customer holdout purchase counts,
+- Pearson correlation between predicted and actual counts,
+- aggregate bias: total predicted vs total actual holdout purchases,
+- the classic conditional-expectation plot (mean actual vs mean predicted
+  holdout purchases, grouped by calibration-period frequency), which is the
+  "reproduction of known results" check from Fader, Hardie & Lee (2005).
+
+Outputs
+-------
+outputs/tables/clv_holdout_metrics.csv        -- headline validation metrics
+outputs/figures/clv_holdout_validation.png    -- 2-panel diagnostic figure
+"""
+
+from __future__ import annotations
+
+import logging
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from lifetimes import BetaGeoFitter
+from lifetimes.utils import calibration_and_holdout_data
+
+from src.config import (
+    BGMD_PENALIZER_COEF,
+    CLEANED_PARQUET,
+    CLV_HOLDOUT_DAYS,
+    OUTPUTS_FIGURES_DIR,
+    OUTPUTS_TABLES_DIR,
+)
+
+logger = logging.getLogger(__name__)
+
+HOLDOUT_METRICS_CSV = OUTPUTS_TABLES_DIR / "clv_holdout_metrics.csv"
+HOLDOUT_PNG = OUTPUTS_FIGURES_DIR / "clv_holdout_validation.png"
+
+# Calibration-frequency bins beyond this are pooled into one "7+" group so the
+# conditional-expectation plot is not dominated by a handful of extreme buyers.
+_MAX_FREQ_BIN = 7
+
+
+def _split_calibration_holdout(transactions: pd.DataFrame) -> tuple[pd.DataFrame, pd.Timestamp, pd.Timestamp]:
+    """Build the lifetimes calibration/holdout summary table.
+
+    The calibration period ends ``CLV_HOLDOUT_DAYS`` days before the last
+    observed transaction, so the holdout window is a full year of genuinely
+    unseen behaviour.
+    """
+    obs_end = transactions["InvoiceDate"].max()
+    calib_end = obs_end - pd.Timedelta(days=CLV_HOLDOUT_DAYS)
+    logger.info(
+        "Calibration period: %s -> %s | holdout: %s -> %s (%d days)",
+        transactions["InvoiceDate"].min().date(), calib_end.date(),
+        calib_end.date(), obs_end.date(), CLV_HOLDOUT_DAYS,
+    )
+
+    summary = calibration_and_holdout_data(
+        transactions,
+        customer_id_col="Customer ID",
+        datetime_col="InvoiceDate",
+        calibration_period_end=calib_end,
+        observation_period_end=obs_end,
+        freq="D",
+    )
+    logger.info(
+        "Calibration/holdout summary built for %d customers active in the "
+        "calibration period.", len(summary),
+    )
+    return summary, calib_end, obs_end
+
+
+def _fit_and_predict(summary: pd.DataFrame) -> pd.DataFrame:
+    """Fit BG/NBD on the calibration columns and predict holdout purchases.
+
+    On the one-year calibration window the *unpenalized* likelihood converges
+    to sensible interior parameters, while small L2 penalties (0.001-0.01)
+    paradoxically push the dropout parameters (a, b) to the boundary and the
+    optimiser reports non-convergence.  The ladder therefore starts at 0 and
+    only escalates if the clean fit fails; every prediction is checked for
+    finiteness downstream, and the penalizer actually used is logged.
+    """
+    bgf = None
+    for pen in (0.0, BGMD_PENALIZER_COEF, 0.01, 0.1):
+        try:
+            candidate = BetaGeoFitter(penalizer_coef=pen)
+            candidate.fit(summary["frequency_cal"], summary["recency_cal"],
+                          summary["T_cal"])
+        except Exception as exc:  # lifetimes raises ConvergenceError
+            logger.warning("BG/NBD calibration fit failed at penalizer=%g: %s",
+                           pen, exc)
+            continue
+        bgf = candidate
+        logger.info("BG/NBD (calibration only) fitted with penalizer=%g. "
+                    "Params:\n%s", pen, bgf.summary.to_string())
+        break
+    if bgf is None:
+        raise RuntimeError("BG/NBD calibration fit failed at every penalizer.")
+
+    out = summary.copy()
+    out["predicted_holdout"] = bgf.conditional_expected_number_of_purchases_up_to_time(
+        out["duration_holdout"],
+        out["frequency_cal"], out["recency_cal"], out["T_cal"],
+    )
+    bad = ~np.isfinite(out["predicted_holdout"])
+    if bad.any():
+        logger.warning(
+            "Dropping %d/%d customers with numerically undefined predictions "
+            "(degenerate parameter/input combinations).", int(bad.sum()), len(out),
+        )
+        out = out[~bad]
+    return out
+
+
+def _compute_metrics(pred_df: pd.DataFrame) -> pd.DataFrame:
+    """Reduce per-customer predictions to the headline validation metrics."""
+    actual = pred_df["frequency_holdout"].to_numpy(dtype=float)
+    predicted = pred_df["predicted_holdout"].to_numpy(dtype=float)
+
+    err = predicted - actual
+    mae = float(np.abs(err).mean())
+    rmse = float(np.sqrt((err ** 2).mean()))
+    corr = float(np.corrcoef(predicted, actual)[0, 1])
+    total_pred = float(predicted.sum())
+    total_actual = float(actual.sum())
+    bias_pct = (total_pred - total_actual) / total_actual * 100 if total_actual else float("nan")
+
+    metrics = pd.DataFrame.from_dict(
+        {
+            "n_customers": len(pred_df),
+            "holdout_days": CLV_HOLDOUT_DAYS,
+            "mae_purchases": round(mae, 4),
+            "rmse_purchases": round(rmse, 4),
+            "pearson_r": round(corr, 4),
+            "total_actual_purchases": int(total_actual),
+            "total_predicted_purchases": round(total_pred, 1),
+            "aggregate_bias_pct": round(bias_pct, 2),
+        },
+        orient="index", columns=["value"],
+    )
+    logger.info("CLV holdout validation metrics:\n%s", metrics.to_string())
+    return metrics
+
+
+def _plot_validation(pred_df: pd.DataFrame) -> None:
+    """Save the 2-panel holdout diagnostic figure.
+
+    Panel 1 is the Fader-Hardie conditional-expectation plot: customers are
+    grouped by how many repeat purchases they made in the calibration period,
+    and the group means of actual vs predicted holdout purchases are compared.
+    Panel 2 aggregates customers into deciles of predicted holdout purchases
+    and compares each decile's mean prediction with its mean actual count
+    (a calibration/reliability curve).
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    # Panel 1: conditional expectation by calibration frequency.
+    grouped = pred_df.copy()
+    grouped["freq_bin"] = grouped["frequency_cal"].clip(upper=_MAX_FREQ_BIN)
+    means = grouped.groupby("freq_bin")[["frequency_holdout", "predicted_holdout"]].mean()
+    labels = [f"{int(i)}" if i < _MAX_FREQ_BIN else f"{_MAX_FREQ_BIN}+"
+              for i in means.index]
+    axes[0].plot(means.index, means["frequency_holdout"], "o-", color="#4C72B0",
+                 linewidth=1.8, label="Actual (holdout)")
+    axes[0].plot(means.index, means["predicted_holdout"], "s--", color="#C44E52",
+                 linewidth=1.8, label="Predicted (BG/NBD)")
+    axes[0].set_xticks(list(means.index))
+    axes[0].set_xticklabels(labels)
+    axes[0].set_xlabel("Repeat purchases in calibration period", fontsize=10)
+    axes[0].set_ylabel("Mean purchases in holdout year", fontsize=10)
+    axes[0].set_title("Conditional expectation of holdout purchases\n"
+                      "(Fader-Hardie calibration/holdout check)",
+                      fontsize=11, fontweight="bold")
+    axes[0].legend(fontsize=9)
+    axes[0].spines[["top", "right"]].set_visible(False)
+
+    # Panel 2: decile reliability curve.
+    dec = pred_df.copy()
+    dec["decile"] = pd.qcut(dec["predicted_holdout"].rank(method="first"),
+                            10, labels=False)
+    dmeans = dec.groupby("decile")[["predicted_holdout", "frequency_holdout"]].mean()
+    lim = float(dmeans.to_numpy().max()) * 1.1
+    axes[1].plot([0, lim], [0, lim], color="grey", linewidth=1.0,
+                 label="Perfect calibration")
+    axes[1].plot(dmeans["predicted_holdout"], dmeans["frequency_holdout"],
+                 "o-", color="#55A868", linewidth=1.8, label="Decile means")
+    axes[1].set_xlabel("Mean predicted holdout purchases (decile)", fontsize=10)
+    axes[1].set_ylabel("Mean actual holdout purchases (decile)", fontsize=10)
+    axes[1].set_title("Reliability of per-customer forecasts\n"
+                      "(customers binned by predicted activity)",
+                      fontsize=11, fontweight="bold")
+    axes[1].legend(fontsize=9)
+    axes[1].spines[["top", "right"]].set_visible(False)
+
+    plt.tight_layout()
+    OUTPUTS_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(HOLDOUT_PNG, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("CLV holdout validation plot saved to %s", HOLDOUT_PNG)
+
+
+def run_clv_holdout_validation(
+    transactions: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Run the calibration/holdout validation of the BG/NBD model.
+
+    Parameters
+    ----------
+    transactions:
+        Cleaned transaction rows.  Pass ``None`` to load from
+        ``data/processed/cleaned_transactions.parquet``.
+
+    Returns
+    -------
+    pd.DataFrame
+        The validation metrics table (also written to CSV).
+    """
+    if transactions is None:
+        logger.info("Loading cleaned transactions from %s", CLEANED_PARQUET)
+        transactions = pd.read_parquet(CLEANED_PARQUET)
+
+    summary, _, _ = _split_calibration_holdout(transactions)
+    pred_df = _fit_and_predict(summary)
+    metrics = _compute_metrics(pred_df)
+
+    OUTPUTS_TABLES_DIR.mkdir(parents=True, exist_ok=True)
+    metrics.to_csv(HOLDOUT_METRICS_CSV)
+    logger.info("CLV holdout metrics saved to %s", HOLDOUT_METRICS_CSV)
+
+    _plot_validation(pred_df)
+    return metrics
+
+```
+
+</details>
+
+**Results:**
+
+*Clv Holdout Metrics*
+
+|  | value |
+| --- | --- |
+| n_customers | 4311.0 |
+| holdout_days | 365.0 |
+| mae_purchases | 2.5134 |
+| rmse_purchases | 3.6067 |
+| pearson_r | 0.8307 |
+| total_actual_purchases | 12315.0 |
+| total_predicted_purchases | 18823.0 |
+| aggregate_bias_pct | 52.85 |
+
+
+![Clv Holdout Validation](figures/clv_holdout_validation.png)
+
+
+---
+
+## Stage 9c — Churn Threshold Sensitivity
+
+Re-derives the churn label at the 85th, 90th and 95th Recency percentile and re-scores every model, testing whether the conclusions depend on the arbitrary label cut-off.
+
+<details>
+<summary>📄 View code: <code>src/churn_sensitivity.py</code> (111 lines)</summary>
+
+```python
+"""
+Sensitivity of the churn results to the label threshold.
+
+The churn label is a *proxy*: a customer is "churned" when their Recency
+exceeds the ``CHURN_RECENCY_PERCENTILE`` (90th) percentile.  That percentile
+is a design choice, so this module checks whether the Phase 8 conclusions --
+tree ensembles beat the linear baseline, and the achievable ROC-AUC is high
+-- survive moving the threshold to the 85th and 95th percentiles.
+
+For each threshold the label is rebuilt, the same six classifiers are
+retrained on the same stratified 80/20 split (same features, same
+``RANDOM_STATE``), and held-out ROC-AUC / PR-AUC / F1 are recorded.  The
+output table lets the report state whether the model ranking is stable
+across plausible labellings rather than tuned to one.
+
+Outputs
+-------
+outputs/tables/churn_threshold_sensitivity.csv
+"""
+
+from __future__ import annotations
+
+import logging
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+from src.churn import CHURN_FEATURES, _build_models
+from src.config import (
+    CUSTOMER_FEATURES_PARQUET,
+    OUTPUTS_TABLES_DIR,
+    RANDOM_STATE,
+    TEST_SIZE,
+)
+
+logger = logging.getLogger(__name__)
+
+THRESHOLD_SENSITIVITY_CSV = OUTPUTS_TABLES_DIR / "churn_threshold_sensitivity.csv"
+
+# Percentile thresholds to test; 0.90 is the value reported in Phase 8.
+THRESHOLDS: list[float] = [0.85, 0.90, 0.95]
+
+
+def _evaluate_threshold(features: pd.DataFrame, percentile: float) -> list[dict]:
+    """Rebuild the label at ``percentile`` and score all six models."""
+    threshold_days = features["Recency"].quantile(percentile)
+    y = (features["Recency"] > threshold_days).astype(int)
+    X = features[CHURN_FEATURES]
+    logger.info(
+        "P%.0f label: Recency > %.0f days -> %d churned (%.1f%%).",
+        percentile * 100, threshold_days, int(y.sum()), y.mean() * 100,
+    )
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=TEST_SIZE, stratify=y, random_state=RANDOM_STATE,
+    )
+    scaler = StandardScaler()
+    X_train_s = scaler.fit_transform(X_train)
+    X_test_s = scaler.transform(X_test)
+
+    pos_weight = float((y_train == 0).sum() / max((y_train == 1).sum(), 1))
+    rows = []
+    for name, model in _build_models(pos_weight).items():
+        model.fit(X_train_s, y_train)
+        proba = model.predict_proba(X_test_s)[:, 1]
+        pred = (proba >= 0.5).astype(int)
+        rows.append({
+            "threshold_percentile": int(percentile * 100),
+            "threshold_days": round(float(threshold_days), 0),
+            "churn_rate_pct": round(float(y.mean() * 100), 1),
+            "Model": name,
+            "ROC_AUC": round(roc_auc_score(y_test, proba), 4),
+            "PR_AUC": round(average_precision_score(y_test, proba), 4),
+            "F1": round(f1_score(y_test, pred, zero_division=0), 4),
+        })
+    return rows
+
+
+def run_churn_threshold_sensitivity(
+    features: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Score all six churn models at each candidate label threshold.
+
+    Returns
+    -------
+    pd.DataFrame
+        Long-format table (threshold x model), also written to
+        ``outputs/tables/churn_threshold_sensitivity.csv``, with a
+        per-threshold ROC-AUC rank column so ranking stability is explicit.
+    """
+    if features is None:
+        logger.info("Loading customer features from %s", CUSTOMER_FEATURES_PARQUET)
+        features = pd.read_parquet(CUSTOMER_FEATURES_PARQUET)
+
+    rows: list[dict] = []
+    for pct in THRESHOLDS:
+        rows.extend(_evaluate_threshold(features, pct))
+    results = pd.DataFrame(rows)
+
+    results["ROC_AUC_rank"] = results.groupby("threshold_percentile")["ROC_AUC"] \
+                                     .rank(ascending=False).astype(int)
+
+    OUTPUTS_TABLES_DIR.mkdir(parents=True, exist_ok=True)
+    results.to_csv(THRESHOLD_SENSITIVITY_CSV, index=False)
+    logger.info("Churn threshold sensitivity saved to %s\n%s",
+                THRESHOLD_SENSITIVITY_CSV, results.to_string(index=False))
+    return results
+
+```
+
+</details>
+
+**Results:**
+
+*Churn Threshold Sensitivity*
+
+| threshold_percentile | threshold_days | churn_rate_pct | Model | ROC_AUC | PR_AUC | F1 | ROC_AUC_rank |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 85 | 449.0 | 15.0 | LogisticRegression | 0.8344 | 0.3768 | 0.4581 | 2 |
+| 85 | 449.0 | 15.0 | RandomForest | 0.8376 | 0.3742 | 0.4933 | 1 |
+| 85 | 449.0 | 15.0 | XGBoost | 0.8278 | 0.3634 | 0.4797 | 3 |
+| 85 | 449.0 | 15.0 | GradientBoosting | 0.8277 | 0.346 | 0.1364 | 4 |
+| 85 | 449.0 | 15.0 | DecisionTree | 0.825 | 0.3534 | 0.4471 | 5 |
+| 85 | 449.0 | 15.0 | KNN | 0.7787 | 0.3112 | 0.179 | 6 |
+| 90 | 535.0 | 10.0 | LogisticRegression | 0.846 | 0.2799 | 0.3649 | 3 |
+| 90 | 535.0 | 10.0 | RandomForest | 0.8491 | 0.2867 | 0.3991 | 1 |
+| 90 | 535.0 | 10.0 | XGBoost | 0.8469 | 0.2972 | 0.3909 | 2 |
+| 90 | 535.0 | 10.0 | GradientBoosting | 0.8445 | 0.2839 | 0.073 | 4 |
+| 90 | 535.0 | 10.0 | DecisionTree | 0.828 | 0.2544 | 0.3731 | 5 |
+| 90 | 535.0 | 10.0 | KNN | 0.8076 | 0.2487 | 0.1169 | 6 |
+| 95 | 625.0 | 5.0 | LogisticRegression | 0.8393 | 0.1682 | 0.2287 | 1 |
+| 95 | 625.0 | 5.0 | RandomForest | 0.8266 | 0.1441 | 0.2391 | 3 |
+| 95 | 625.0 | 5.0 | XGBoost | 0.8318 | 0.1577 | 0.2294 | 2 |
+| 95 | 625.0 | 5.0 | GradientBoosting | 0.8212 | 0.134 | 0.0282 | 4 |
+| 95 | 625.0 | 5.0 | DecisionTree | 0.8133 | 0.1497 | 0.2301 | 5 |
+| 95 | 625.0 | 5.0 | KNN | 0.794 | 0.1552 | 0.0769 | 6 |
+
+
+---
+
+## Stage 9d — ROI Assumption Sensitivity
+
+Re-runs both the targeted and blanket simulations under perturbed margin, response-rate, contact-cost and compound-worst-case assumptions, reporting mean uplift and P(uplift > 0) per scenario.
+
+<details>
+<summary>📄 View code: <code>src/roi_sensitivity.py</code> (224 lines)</summary>
+
+```python
+"""
+Sensitivity analysis for the Monte Carlo ROI simulation.
+
+The Phase 11 headline (targeted plan beats the static blanket campaign) rests
+on *assumed* response-rate priors, channel costs, and margin parameters.  This
+module stress-tests that conclusion: each scenario perturbs one assumption
+(or, in the worst-case scenario, several at once) and re-runs the full
+10,000-iteration simulation for both the targeted plan and the static
+baseline.  If the profit uplift of targeting stays positive across every
+scenario -- including the deliberately pessimistic ones -- the headline claim
+is robust to the planning assumptions rather than an artefact of them.
+
+Scenario design
+---------------
+- ``response x0.5 / x0.75 / x1.5``: scale the *targeted* campaign priors while
+  leaving the static baseline untouched (halving only the targeted rates is
+  the conservative direction: it handicaps the plan, not the baseline).
+- ``static response x2``: double the blanket campaign's response rate instead.
+- ``costs x2 / x5``: scale every per-contact channel cost for both plans.
+- ``margin 30% -> 20%`` and ``discount 10% -> 15%``: squeeze the profit
+  conversion for both plans.
+- ``worst case``: response x0.5, static x2, costs x2, margin 20%, discount 15%
+  simultaneously.
+
+Outputs
+-------
+outputs/tables/roi_sensitivity.csv     -- per-scenario summary table
+outputs/figures/roi_sensitivity.png    -- tornado-style uplift chart
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+from src.config import (
+    CUSTOMER_CLV_PARQUET,
+    NOTIFICATION_PLAN_CSV,
+    OUTPUTS_FIGURES_DIR,
+    OUTPUTS_TABLES_DIR,
+    RANDOM_STATE,
+    ROI_GROSS_MARGIN,
+    ROI_N_SIMULATIONS,
+    ROI_OFFER_DISCOUNT,
+    ROI_RESPONSE_CONCENTRATION,
+    ROI_REVENUE_NOISE_SD,
+    ROI_STATIC_RESPONSE,
+)
+from src.roi import _build_campaign_table, _build_static_baseline
+
+logger = logging.getLogger(__name__)
+
+SENSITIVITY_CSV = OUTPUTS_TABLES_DIR / "roi_sensitivity.csv"
+SENSITIVITY_PNG = OUTPUTS_FIGURES_DIR / "roi_sensitivity.png"
+
+
+@dataclass
+class Scenario:
+    """One perturbation of the ROI simulation's planning assumptions."""
+    name: str
+    response_scale: float = 1.0      # multiplier on targeted campaign priors
+    static_response: float = ROI_STATIC_RESPONSE
+    cost_scale: float = 1.0          # multiplier on per-contact costs
+    gross_margin: float = ROI_GROSS_MARGIN
+    offer_discount: float = ROI_OFFER_DISCOUNT
+    notes: str = field(default="")
+
+
+SCENARIOS: list[Scenario] = [
+    Scenario("Baseline (reported)", notes="Assumptions as configured in Phase 11"),
+    Scenario("Response priors x0.5", response_scale=0.5,
+             notes="Targeted response rates halved; static unchanged"),
+    Scenario("Response priors x0.75", response_scale=0.75),
+    Scenario("Response priors x1.5", response_scale=1.5),
+    Scenario("Static response x2 (4%)", static_response=0.04,
+             notes="Blanket campaign responds twice as well as assumed"),
+    Scenario("Channel costs x2", cost_scale=2.0),
+    Scenario("Channel costs x5", cost_scale=5.0),
+    Scenario("Gross margin 30% -> 20%", gross_margin=0.20),
+    Scenario("Offer discount 10% -> 15%", offer_discount=0.15),
+    Scenario("Worst case (all pessimistic)", response_scale=0.5,
+             static_response=0.04, cost_scale=2.0,
+             gross_margin=0.20, offer_discount=0.15,
+             notes="Every assumption moved against the targeted plan at once"),
+]
+
+
+def _simulate_parameterised(
+    campaigns: pd.DataFrame,
+    response_scale: float,
+    cost_scale: float,
+    gross_margin: float,
+    offer_discount: float,
+    rng_seed: int = RANDOM_STATE,
+) -> dict[str, np.ndarray]:
+    """Re-implementation of :func:`src.roi._simulate` with explicit knobs.
+
+    Identical sampling scheme (Beta response -> Binomial conversions ->
+    Normal basket noise -> margin/discount contribution), but response priors,
+    costs, and profit-conversion parameters are arguments rather than module
+    constants so scenarios can perturb them independently.
+    """
+    rng = np.random.default_rng(rng_seed)
+    n_iter = ROI_N_SIMULATIONS
+
+    total_revenue = np.zeros(n_iter)
+    total_cost = float(campaigns["total_cost"].sum()) * cost_scale
+
+    for _, row in campaigns.iterrows():
+        n = int(row["n_customers"])
+        aov = float(row["mean_aov"]) if np.isfinite(row["mean_aov"]) else 0.0
+        prior = min(float(row["response_prior"]) * response_scale, 0.99)
+
+        a = prior * ROI_RESPONSE_CONCENTRATION
+        b = (1.0 - prior) * ROI_RESPONSE_CONCENTRATION
+        rates = rng.beta(a, b, size=n_iter)
+
+        conversions = rng.binomial(n, rates)
+        noise = np.clip(rng.normal(1.0, ROI_REVENUE_NOISE_SD, size=n_iter), 0.0, None)
+        total_revenue += conversions * aov * noise
+
+    contribution = total_revenue * (gross_margin - offer_discount)
+    profit = contribution - total_cost
+    roi = profit / total_cost if total_cost > 0 else np.zeros(n_iter)
+    return {"roi": roi, "profit": profit, "cost": np.full(n_iter, total_cost)}
+
+
+def _run_scenario(
+    sc: Scenario,
+    campaigns: pd.DataFrame,
+    baseline: pd.DataFrame,
+) -> dict[str, float | str]:
+    """Simulate one scenario for both plans and summarise the uplift."""
+    static = baseline.copy()
+    static["response_prior"] = sc.static_response
+
+    targeted_sim = _simulate_parameterised(
+        campaigns, sc.response_scale, sc.cost_scale,
+        sc.gross_margin, sc.offer_discount,
+    )
+    # Static baseline: response_scale=1 because its response rate is already
+    # set explicitly above; cost/margin/discount perturbations apply to both.
+    static_sim = _simulate_parameterised(
+        static, 1.0, sc.cost_scale, sc.gross_margin, sc.offer_discount,
+    )
+
+    t_roi = targeted_sim["roi"]
+    profit_uplift = targeted_sim["profit"] - static_sim["profit"]
+    row = {
+        "scenario": sc.name,
+        "targeted_mean_roi": round(float(t_roi.mean()), 2),
+        "static_mean_roi": round(float(static_sim["roi"].mean()), 2),
+        "mean_profit_uplift": round(float(profit_uplift.mean()), 0),
+        "prob_positive_uplift": round(float((profit_uplift > 0).mean()), 4),
+        "prob_positive_roi": round(float((t_roi > 0).mean()), 4),
+    }
+    logger.info("Scenario %-32s targeted ROI=%8.2f  uplift=%12.0f  P(uplift>0)=%.4f",
+                sc.name, row["targeted_mean_roi"], row["mean_profit_uplift"],
+                row["prob_positive_uplift"])
+    return row
+
+
+def _plot_sensitivity(results: pd.DataFrame) -> None:
+    """Save a tornado-style horizontal bar chart of mean profit uplift."""
+    df = results.iloc[::-1]  # baseline at top after inversion
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors = ["#C44E52" if v <= 0 else "#4C72B0" for v in df["mean_profit_uplift"]]
+    ax.barh(df["scenario"], df["mean_profit_uplift"], color=colors, alpha=0.85)
+    ax.axvline(0, color="grey", linewidth=1.0)
+    for y, v in enumerate(df["mean_profit_uplift"]):
+        ax.text(v, y, f" {v:,.0f}", va="center", fontsize=8.5,
+                ha="left" if v >= 0 else "right")
+    ax.set_xlabel("Mean profit uplift of targeted plan vs static baseline (currency)",
+                  fontsize=10)
+    ax.set_title("ROI sensitivity: profit uplift under perturbed assumptions\n"
+                 f"({ROI_N_SIMULATIONS:,} Monte Carlo runs per scenario)",
+                 fontsize=11, fontweight="bold")
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.tight_layout()
+    OUTPUTS_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(SENSITIVITY_PNG, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("ROI sensitivity plot saved to %s", SENSITIVITY_PNG)
+
+
+def run_roi_sensitivity(
+    plan: pd.DataFrame | None = None,
+    clv: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Run every scenario and produce the sensitivity table + tornado chart.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per scenario (also written to
+        ``outputs/tables/roi_sensitivity.csv``).
+    """
+    if plan is None:
+        logger.info("Loading notification plan from %s", NOTIFICATION_PLAN_CSV)
+        plan = pd.read_csv(NOTIFICATION_PLAN_CSV)
+    if clv is None:
+        logger.info("Loading CLV table from %s", CUSTOMER_CLV_PARQUET)
+        clv = pd.read_parquet(CUSTOMER_CLV_PARQUET)
+
+    campaigns = _build_campaign_table(plan, clv)
+    baseline = _build_static_baseline(plan, clv)
+
+    results = pd.DataFrame([_run_scenario(sc, campaigns, baseline)
+                            for sc in SCENARIOS])
+
+    OUTPUTS_TABLES_DIR.mkdir(parents=True, exist_ok=True)
+    results.to_csv(SENSITIVITY_CSV, index=False)
+    logger.info("ROI sensitivity table saved to %s\n%s",
+                SENSITIVITY_CSV, results.to_string(index=False))
+
+    _plot_sensitivity(results)
+    return results
+
+```
+
+</details>
+
+**Results:**
+
+*Roi Sensitivity*
+
+| scenario | targeted_mean_roi | static_mean_roi | mean_profit_uplift | prob_positive_uplift | prob_positive_roi |
+| --- | --- | --- | --- | --- | --- |
+| Baseline (reported) | 38.42 | 30.38 | 15025.0 | 0.9619 | 1.0 |
+| Response priors x0.5 | 18.71 | 30.38 | 2739.0 | 0.6942 | 1.0 |
+| Response priors x0.75 | 28.45 | 30.38 | 8809.0 | 0.8842 | 1.0 |
+| Response priors x1.5 | 58.19 | 30.38 | 27357.0 | 0.9952 | 1.0 |
+| Static response x2 (4%) | 38.42 | 61.46 | 5889.0 | 0.7381 | 1.0 |
+| Channel costs x2 | 18.71 | 14.69 | 14695.0 | 0.9602 | 1.0 |
+| Channel costs x5 | 6.88 | 5.28 | 13707.0 | 0.9489 | 1.0 |
+| Gross margin 30% -> 20% | 18.71 | 14.69 | 7348.0 | 0.9602 | 1.0 |
+| Offer discount 10% -> 15% | 28.56 | 22.53 | 11186.0 | 0.9614 | 1.0 |
+| Worst case (all pessimistic) | 1.46 | 6.81 | -2176.0 | 0.0461 | 0.9918 |
+
+
+![Roi Sensitivity](figures/roi_sensitivity.png)
+
+
+---
+
+## Stage 10 — Streamlit Dashboard
 
 Interactive 8-page dashboard over every artefact, including a live customer-lookup that calls recommend(customer_id).
 
 <details>
-<summary>📄 View code: <code>app/streamlit_app.py</code> (316 lines)</summary>
+<summary>📄 View code: <code>app/streamlit_app.py</code> (317 lines)</summary>
 
 ```python
 """
@@ -4531,14 +5696,14 @@ def page_overview() -> None:
         | Stage | Output |
         |-------|--------|
         | 1–2b  | Data cleaning, RFM + extended features, scaling |
-        | 3–4   | Clustering: K-Means, DBSCAN, GMM, HDBSCAN |
+        | 3     | Clustering: K-Means, DBSCAN, GMM, HDBSCAN |
         | 3b    | Internal validation + bootstrap stability |
-        | 6     | Segment profiling & marketing names |
-        | 7     | CLV (BG/NBD + Gamma-Gamma) |
-        | 8     | Churn classification (LogReg / RF / XGBoost) |
-        | 9     | Year-on-year segment migration |
-        | 10    | Rule-based notification engine |
-        | 11    | Monte Carlo ROI simulation |
+        | 4     | Segment profiling & marketing names |
+        | 5     | CLV (BG/NBD + Gamma-Gamma) |
+        | 6     | Churn classification (LogReg / RF / XGBoost) |
+        | 7     | Year-on-year segment migration |
+        | 8     | Rule-based notification engine |
+        | 9     | Monte Carlo ROI simulation |
         """
     )
 
@@ -4612,10 +5777,11 @@ def page_churn() -> None:
                        "Feature importance")
 
     st.subheader("Churn-probability distribution")
-    st.bar_chart(
-        pd.cut(churn["churn_probability"], bins=20).value_counts().sort_index()
-        .rename_axis("probability_bin").rename("customers")
-    )
+    binned = pd.cut(churn["churn_probability"], bins=20).value_counts().sort_index()
+    # pandas Interval objects can't be serialised to the chart spec; convert the
+    # bins to readable string range labels first.
+    binned.index = [f"{iv.left:.2f}–{iv.right:.2f}" for iv in binned.index]
+    st.bar_chart(binned.rename_axis("probability_bin").rename("customers"))
 
 
 def page_migration() -> None:

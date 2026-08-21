@@ -161,8 +161,8 @@ def _print_pipeline_summary(
     _divider()
     _row("Selected algorithm:", validation.best_algorithm)
 
-    # ── Stage 6: Cluster profiling ──────────────────────────────────────────
-    print(f"\n  STAGE 6 - Segment Profiles ({validation.best_algorithm})")
+    # ── Stage 4: Cluster profiling ──────────────────────────────────────────
+    print(f"\n  STAGE 4 - Segment Profiles ({validation.best_algorithm})")
     _divider()
     _row("Segment", "n        %      Recency  Frequency  Monetary")
     _divider()
@@ -174,8 +174,8 @@ def _print_pipeline_summary(
             f"{row['Recency']:<9.0f}{row['Frequency']:<11.1f}{row['Monetary']:.0f}",
         )
 
-    # ── Stage 7: Customer Lifetime Value ────────────────────────────────────
-    print(f"\n  STAGE 7 - Customer Lifetime Value (BG/NBD + Gamma-Gamma)")
+    # ── Stage 5: Customer Lifetime Value ────────────────────────────────────
+    print(f"\n  STAGE 5 - Customer Lifetime Value (BG/NBD + Gamma-Gamma)")
     _divider()
     clv = clv_df["clv"]
     total_clv = clv.sum()
@@ -188,8 +188,8 @@ def _print_pipeline_summary(
     _row("Top-decile CLV share:", f"{top_share:.1f}%  (top 10% of customers)")
     _row("Mean P(alive):", f"{clv_df['prob_alive'].mean():.3f}")
 
-    # ── Stage 8: Churn classification ───────────────────────────────────────
-    print(f"\n  STAGE 8 - Churn Classification")
+    # ── Stage 6: Churn classification ───────────────────────────────────────
+    print(f"\n  STAGE 6 - Churn Classification")
     _divider()
     _row("Churn rate (label):", f"{churn_df['churn_label'].mean()*100:.1f}%  "
                                  f"({int(churn_df['churn_label'].sum()):,} churned)")
@@ -205,8 +205,8 @@ def _print_pipeline_summary(
     _row("Best churn model:", f"{best_churn}  (ROC-AUC={churn_metrics.loc[best_churn,'ROC_AUC']:.4f})")
     _row("Mean churn probability:", f"{churn_df['churn_probability'].mean():.3f}")
 
-    # ── Stage 9: Segment migration (year-on-year) ───────────────────────────
-    print(f"\n  STAGE 9 - Year-on-Year Segment Migration")
+    # ── Stage 7: Segment migration (year-on-year) ───────────────────────────
+    print(f"\n  STAGE 7 - Year-on-Year Segment Migration")
     _divider()
     ctx = migration["context"]
     _row("Retained (both years):", f"{ctx['retained_both_years']:,}")
@@ -221,8 +221,8 @@ def _print_pipeline_summary(
         if counts.loc[seg].sum() > 0:
             _row(f"  {seg}", f"{rates.loc[seg, seg]*100:.1f}%")
 
-    # ── Stage 10: Notification engine ───────────────────────────────────────
-    print(f"\n  STAGE 10 - Rule-Based Notification Plan")
+    # ── Stage 8: Notification engine ───────────────────────────────────────
+    print(f"\n  STAGE 8 - Rule-Based Notification Plan")
     _divider()
     _row("Customers with a plan:", f"{len(plan):,}")
     _divider()
@@ -236,8 +236,8 @@ def _print_pipeline_summary(
     for pri, cnt in plan["priority"].value_counts().sort_index(ascending=False).items():
         _row(f"  Priority {pri}", f"{cnt:,}")
 
-    # ── Stage 11: Monte Carlo ROI ───────────────────────────────────────────
-    print(f"\n  STAGE 11 - Monte Carlo ROI Simulation")
+    # ── Stage 9: Monte Carlo ROI ───────────────────────────────────────────
+    print(f"\n  STAGE 9 - Monte Carlo ROI Simulation")
     _divider()
     rs = roi_summary["value"]
     _row("Simulations:", f"{int(rs['n_simulations']):,}")
@@ -357,29 +357,29 @@ def run_pipeline() -> None:
     from src.validation import run_validation
     validation = run_validation(X=prep.X_scaled, labels_dict=labels_dict)
 
-    # Stage 6 – Cluster profiling & segment naming
+    # Stage 4 – Cluster profiling & segment naming
     from src.profiling import profile_clusters
     best_algo = validation.best_algorithm
     profiles = profile_clusters(algo=best_algo)  # used in summary below
 
-    # Stage 7 – Customer Lifetime Value (BG/NBD + Gamma-Gamma)
+    # Stage 5 – Customer Lifetime Value (BG/NBD + Gamma-Gamma)
     from src.clv import build_clv
     clv_df = build_clv(transactions=cleaned)
 
-    # Stage 8 – Churn classification (LogReg / RandomForest / XGBoost)
+    # Stage 6 – Churn classification (LogReg / RandomForest / XGBoost)
     from src.churn import run_churn
     churn_df = run_churn(features=features_df)
     churn_metrics = pd.read_csv(TABLES_DIR / "churn_model_comparison.csv", index_col=0)
 
-    # Stage 9 – Year-on-year segment migration
+    # Stage 7 – Year-on-year segment migration
     from src.migration import run_migration
     migration = run_migration(transactions=cleaned)
 
-    # Stage 10 – Rule-based notification engine
+    # Stage 8 – Rule-based notification engine
     from src.notifications import generate_notifications
     plan = generate_notifications()
 
-    # Stage 11 – Monte Carlo ROI simulation
+    # Stage 9 – Monte Carlo ROI simulation
     from src.roi import run_roi_simulation
     roi_summary = run_roi_simulation(plan=plan, clv=clv_df)
 

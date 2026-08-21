@@ -1,11 +1,28 @@
+# Python 3.11 — pinned to the versions the reported results were produced with.
+# Install with:  pip install -r requirements.txt
+
+# --- core data stack -------------------------------------------------------
 pandas==2.2.2
 numpy==1.26.4
+scipy==1.17.1
+pyarrow==24.0.0          # Parquet engine for data/processed/*.parquet
+openpyxl==3.1.4          # reads data/raw/raj.xlsx
+
+# --- modelling -------------------------------------------------------------
 scikit-learn==1.5.0
-matplotlib==3.9.0
-seaborn==0.13.2
-lifetimes==0.11.3
 hdbscan==0.8.38.post2
 xgboost==2.0.3
+lifetimes==0.11.3        # BG/NBD + Gamma-Gamma CLV
+joblib==1.5.3            # persists the fitted scaler
+
+# --- figures & dashboard ---------------------------------------------------
+matplotlib==3.9.0
 streamlit==1.35.0
-openpyxl==3.1.4
+
+# --- tests -----------------------------------------------------------------
 pytest==8.2.2
+
+# --- report generators (scripts/; not needed to run the pipeline) ----------
+nbformat==5.10.4
+nbconvert==7.17.0
+python-pptx==1.0.2

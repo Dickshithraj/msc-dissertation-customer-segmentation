@@ -54,26 +54,26 @@ not relevant to this project's scope.
 21. **"RFM ranking – An effective approach to customer segmentation."** *J. King Saud Univ. – Computer & Information Sciences.* [ScienceDirect](https://www.sciencedirect.com/science/article/pii/S1319157818304178)
 22. **"Predicting Customer Value Using Clumpiness: From RFM to RFMC."** *Marketing Science (INFORMS).* — respected RFM extension. [INFORMS](https://pubsonline.informs.org/doi/10.1287/mksc.2014.0873)
 
-### D. Algorithm comparison — K-Means vs DBSCAN vs HDBSCAN (Stages 3–4)
+### D. Algorithm comparison — K-Means vs DBSCAN vs HDBSCAN (Stage 3)
 23. **"Comparison of K-Means and DBSCAN Algorithms for Customer Segmentation in E-commerce."** *J. Digital Market & Digital Currency.* [JDMDC](https://jdmdc.com/index.php/JDMDC/article/view/3)
 24. **"Intelligent Vector-based Customer Segmentation in the Banking Industry."** *arXiv:2012.11876.* [arXiv](https://arxiv.org/pdf/2012.11876)
 
-### E. Customer Lifetime Value (Stage 7)
+### E. Customer Lifetime Value (Stage 5)
 25. **Fader, P., Hardie, B. & Lee, K. (2005).** "Counting Your Customers the Easy Way: An Alternative to the Pareto/NBD Model." *Marketing Science, 24(2), 275–284.* — **the BG/NBD model used here.** *(seminal — Google Scholar)*
 26. **Fader, P., Hardie, B. & Lee, K. (2005).** "RFM and CLV: Using Iso-Value Curves for Customer Base Analysis." *J. Marketing Research, 42(4), 415–430.* — links RFM ↔ CLV (Gamma-Gamma context). *(seminal — Google Scholar)*
 27. **"Application of BG/NBD and Gamma-Gamma Models to Predict Customer Lifetime Value for a Financial Institution."** *IEEE.* — applied use of this exact model pair. [IEEE Xplore](https://ieeexplore.ieee.org/document/9620535/)
 28. **"A data-driven approach to customer lifetime value prediction using probability and machine learning models" (2025).** *ScienceDirect.* [link](https://www.sciencedirect.com/science/article/pii/S2772662225000578)
 
-### F. Churn prediction (Stage 8)
+### F. Churn prediction (Stage 6)
 29. **"Application of machine learning techniques for churn prediction in the telecom business."** *ScienceDirect.* [link](https://www.sciencedirect.com/science/article/pii/S2590123024014208)
 30. **"A comprehensive survey on customer churn analysis studies" (2025).** *Taylor & Francis.* — anchors the churn section. [T&F](https://www.tandfonline.com/doi/full/10.1080/24751839.2025.2528440)
 > See also the multi-task churn papers in **Part 2** (#37, #38, #45, #46).
 
-### G. Personalized marketing, CRM & notification logic (Stage 10)
+### G. Personalized marketing, CRM & notification logic (Stage 8)
 31. **"Leveraging Machine Learning Algorithms in Enterprise CRM Architectures for Personalized Marketing Automation."** *J. Artificial Intelligence Research.* — the "dynamic CRM" framing. [link](https://thesciencebrigade.com/JAIR/article/view/526)
 32. **Liu (2022).** "e-Commerce Personalized Recommendation Based on Machine Learning Technology." *Mobile Information Systems (Wiley).* [Wiley](https://onlinelibrary.wiley.com/doi/10.1155/2022/1761579)
 
-### H. Uplift modeling & marketing ROI (Stage 11 — your "vs static" differentiator)
+### H. Uplift modeling & marketing ROI (Stage 9 — your "vs static" differentiator)
 33. **"Dynamic Marketing Uplift Modeling: A Symmetry-Preserving Framework Integrating Causal Forests with Deep RL."** *Symmetry (MDPI), 17(4), 610.* [MDPI](https://www.mdpi.com/2073-8994/17/4/610)
 34. **"Contextual Multi-Armed Bandits for Causal Marketing."** *arXiv:1810.01859.* — causal/incremental targeting; supports "uplift vs static baseline". [arXiv](https://arxiv.org/pdf/1810.01859)
 

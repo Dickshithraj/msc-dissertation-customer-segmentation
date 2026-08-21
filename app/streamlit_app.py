@@ -100,14 +100,14 @@ def page_overview() -> None:
         | Stage | Output |
         |-------|--------|
         | 1–2b  | Data cleaning, RFM + extended features, scaling |
-        | 3–4   | Clustering: K-Means, DBSCAN, GMM, HDBSCAN |
+        | 3     | Clustering: K-Means, DBSCAN, GMM, HDBSCAN |
         | 3b    | Internal validation + bootstrap stability |
-        | 6     | Segment profiling & marketing names |
-        | 7     | CLV (BG/NBD + Gamma-Gamma) |
-        | 8     | Churn classification (LogReg / RF / XGBoost) |
-        | 9     | Year-on-year segment migration |
-        | 10    | Rule-based notification engine |
-        | 11    | Monte Carlo ROI simulation |
+        | 4     | Segment profiling & marketing names |
+        | 5     | CLV (BG/NBD + Gamma-Gamma) |
+        | 6     | Churn classification (LogReg / RF / XGBoost) |
+        | 7     | Year-on-year segment migration |
+        | 8     | Rule-based notification engine |
+        | 9     | Monte Carlo ROI simulation |
         """
     )
 
