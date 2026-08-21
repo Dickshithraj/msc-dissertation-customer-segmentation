@@ -1,0 +1,5 @@
+Step,Description,Rows Before,Rows After,Rows Removed,% Removed
+1,Drop missing Customer ID,1067371,824364,243007,22.77
+2,Remove cancelled invoices (prefix 'C'),824364,805620,18744,2.27
+3,Remove Quantity < 1 or Price < 0.01,805620,805531,89,0.01
+4,Drop exact duplicate rows,805531,793591,11940,1.48

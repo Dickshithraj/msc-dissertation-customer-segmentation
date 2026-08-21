@@ -139,7 +139,7 @@ Reproduced by `python main.py` on the full dataset (~160 s, CPU only):
 │   └── make_presentation.py     # -> docs/presentation.pptx
 ├── tests/                   # 20-test pytest suite (synthetic data, no Excel needed)
 ├── data/
-│   ├── raw/raj.xlsx         # input (not committed)
+│   ├── raw/raj.xlsx         # input (read-only; never modified)
 │   └── processed/           # parquet artefacts (generated)
 ├── outputs/
 │   ├── figures/             # PNG charts (generated)

@@ -1,0 +1,9 @@
+,value
+n_customers,4311.0
+holdout_days,365.0
+mae_purchases,2.5134
+rmse_purchases,3.6067
+pearson_r,0.8307
+total_actual_purchases,12315.0
+total_predicted_purchases,18823.0
+aggregate_bias_pct,52.85

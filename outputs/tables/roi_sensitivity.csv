@@ -1,0 +1,11 @@
+scenario,targeted_mean_roi,static_mean_roi,mean_profit_uplift,prob_positive_uplift,prob_positive_roi
+Baseline (reported),38.42,30.38,15025.0,0.9619,1.0
+Response priors x0.5,18.71,30.38,2739.0,0.6942,1.0
+Response priors x0.75,28.45,30.38,8809.0,0.8842,1.0
+Response priors x1.5,58.19,30.38,27357.0,0.9952,1.0
+Static response x2 (4%),38.42,61.46,5889.0,0.7381,1.0
+Channel costs x2,18.71,14.69,14695.0,0.9602,1.0
+Channel costs x5,6.88,5.28,13707.0,0.9489,1.0
+Gross margin 30% -> 20%,18.71,14.69,7348.0,0.9602,1.0
+Offer discount 10% -> 15%,28.56,22.53,11186.0,0.9614,1.0
+Worst case (all pessimistic),1.46,6.81,-2176.0,0.0461,0.9918

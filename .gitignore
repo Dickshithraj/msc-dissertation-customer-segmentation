@@ -21,13 +21,10 @@ build/
 .ipynb_checkpoints/
 *.ipynb
 
-# Data files — keep raw source under version control; exclude large processed artefacts
-data/processed/*
-!data/processed/.gitkeep
-outputs/figures/*
-!outputs/figures/.gitkeep
-outputs/tables/*
-!outputs/tables/.gitkeep
+# Data files — the raw workbook, the processed datasets, and every result table
+# and figure are kept under version control: Appendix A.1/A.5 of the report list
+# them as repository contents, and they let an assessor open the dashboard
+# without first re-running the pipeline.
 
 # Pytest cache
 .pytest_cache/
