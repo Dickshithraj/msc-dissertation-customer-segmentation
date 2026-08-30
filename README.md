@@ -107,6 +107,13 @@ Reproduced by `python main.py` on the full dataset (~160 s, CPU only):
 
 ---
 
+> **Note on scope.** This repository contains the pipeline, tests, and generated
+> results only. The dissertation report is submitted separately as a PDF, and the
+> report-generation scripts above write their output to a local `docs/` directory
+> that is not tracked here.
+
+---
+
 ## Project layout
 
 ```
@@ -134,9 +141,9 @@ Reproduced by `python main.py` on the full dataset (~160 s, CPU only):
 │   ├── run_new_validations.py   # -> the three validation analyses above
 │   ├── build_notebook.py        # -> executed Jupyter notebook of the pipeline
 │   ├── generate_report.py       # -> single self-contained HTML report
-│   ├── build_github_report.py   # -> docs/RESULTS.md (GitHub-renderable)
+│   ├── build_github_report.py   # -> a Markdown results write-up (generated locally)
 │   ├── make_diagrams.py         # -> architecture / component diagrams
-│   └── make_presentation.py     # -> docs/presentation.pptx
+│   └── make_presentation.py     # -> a PowerPoint summary (generated locally)
 ├── tests/                   # 20-test pytest suite (synthetic data, no Excel needed)
 ├── data/
 │   ├── raw/raj.xlsx         # input (read-only; never modified)
@@ -144,10 +151,6 @@ Reproduced by `python main.py` on the full dataset (~160 s, CPU only):
 ├── outputs/
 │   ├── figures/             # PNG charts (generated)
 │   └── tables/              # CSV results (generated)
-├── docs/                    # results report + dissertation documents
-│   ├── RESULTS.md           # GitHub-renderable results write-up
-│   ├── figures/             # figures embedded in RESULTS.md
-│   └── dissertation/        # specs + marking guidance (Word/PDF)
 └── requirements.txt
 ```
 

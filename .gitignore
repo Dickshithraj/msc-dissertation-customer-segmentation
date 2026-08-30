@@ -66,3 +66,9 @@ app/.streamlit/secrets.toml
 /SoC-report-Template.docx
 docs/dissertation/vani_backup_*.docx
 docs/dissertation/Marking Guidance*.pdf
+
+# Excluded from the submitted code repository
+# (the report is submitted separately as PDF; these are not code artefacts)
+docs/
+notebooks/
+DECISIONS.md
