@@ -21,8 +21,3 @@ streamlit==1.35.0
 
 # --- tests -----------------------------------------------------------------
 pytest==8.2.2
-
-# --- report generators (scripts/; not needed to run the pipeline) ----------
-nbformat==5.10.4
-nbconvert==7.17.0
-python-pptx==1.0.2

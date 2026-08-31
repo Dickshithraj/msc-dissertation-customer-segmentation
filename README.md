@@ -30,41 +30,126 @@ inspected without re-running the whole thing.
 
 ---
 
-## 2. Running it
+## 2. Running it — step by step
 
-**Requirements:** Python 3.11. No GPU. The full run takes about 160 seconds on a
-normal laptop.
+**Requirements:** Python 3.11, about 500 MB of disk space, no GPU.
+The full pipeline takes roughly **160 seconds** on an ordinary laptop.
+
+### Step 1 — check your Python version
 
 ```bash
-# 1. install dependencies
+python --version          # must be 3.11.x
+```
+
+If it reports 3.12 or newer, some pinned packages will not install. Use a
+3.11 interpreter (`py -3.11` on Windows).
+
+### Step 2 — get the code
+
+```bash
+git clone https://github.com/Dickshithraj/msc-dissertation-customer-segmentation.git
+cd msc-dissertation-customer-segmentation
+```
+
+The repository includes the dataset and all generated results, so the download
+is around 250 MB and nothing further needs to be fetched.
+
+### Step 3 — create an isolated environment
+
+```bash
+python -m venv .venv
+
+# Windows
+.venv\Scriptsctivate
+
+# macOS / Linux
+source .venv/bin/activate
+```
+
+Your prompt should now begin with `(.venv)`.
+
+### Step 4 — install the dependencies
+
+```bash
 pip install -r requirements.txt
+```
 
-# 2. run the whole pipeline  (~160 s — regenerates every table and figure)
+Every version is pinned to the one the reported results were produced with.
+This takes two to three minutes on a first install.
+
+### Step 5 — confirm the data is present
+
+```bash
+# Windows
+dir dataawaj.xlsx
+# macOS / Linux
+ls -lh data/raw/raj.xlsx
+```
+
+You should see a file of about **45 MB**. It is already in the repository —
+there is nothing to download.
+
+### Step 6 — run the pipeline
+
+```bash
 python main.py
+```
 
-# 3. run the three validation analyses reported in Chapter 5
+Run this **from the project root**, with the virtual environment active. The
+console prints a banner for each of the twelve stages as it completes, then a
+summary table of the headline numbers. Expect roughly 160 seconds.
+
+When it finishes, `outputs/tables/` holds 18 CSV files and `outputs/figures/`
+holds 22 PNG files — every result reported in the dissertation.
+
+### Step 7 — run the Chapter 5 validation analyses
+
+```bash
 python scripts/run_new_validations.py
+```
 
-# 4. explore the results interactively
+This produces the three analyses reported in Sections 5.3.2 (churn-threshold
+sensitivity), 5.4 (CLV temporal holdout) and 5.7 (ROI assumption sensitivity).
+It reads the artefacts written by Step 6, so run it afterwards.
+
+### Step 8 — run the tests
+
+```bash
+pytest
+```
+
+20 tests across 7 modules. They use synthetic fixtures, so they pass without the
+Excel file and complete in a few seconds.
+
+### Step 9 — open the dashboard
+
+```bash
 streamlit run app/streamlit_app.py
 ```
 
-**The dataset is already in the repository** (`data/raw/raj.xlsx`, 45 MB), so
-nothing needs to be downloaded first.
-
-To check the code is behaving correctly:
-
-```bash
-pytest          # 20 unit tests, synthetic data, no Excel file needed
-```
-
-### Nothing needs to be run to inspect the results
-
-Every table and figure the dissertation reports is already committed under
-`outputs/`. Running `main.py` regenerates them identically — the pipeline is
-seeded, so a fresh run reproduces the committed files byte for byte.
+Opens an eight-page interactive dashboard in your browser, including a live
+per-customer lookup. Press `Ctrl+C` in the terminal to stop it.
 
 ---
+
+### You do not have to run anything to inspect the results
+
+Every table and figure the dissertation reports is already committed under
+`outputs/`. Steps 6 and 7 regenerate them identically — the pipeline is fully
+seeded, so a fresh run reproduces the committed files exactly.
+
+---
+
+### If something goes wrong
+
+| Symptom | Cause and fix |
+|---|---|
+| `ModuleNotFoundError: No module named 'src'` | You are not in the project root. `cd` to the folder containing `main.py`. |
+| `pip install` fails on `hdbscan` | Needs C++ build tools. On Windows install the Microsoft C++ Build Tools; on Linux `sudo apt install build-essential`. |
+| A package refuses to install | Check `python --version` is 3.11. Newer versions have no wheels for some pinned releases. |
+| `FileNotFoundError: data/raw/raj.xlsx` | The clone did not complete. Confirm the file is present and about 45 MB. |
+| `streamlit: command not found` | The virtual environment is not active. Re-run the Step 3 activation command. |
+| The run seems stuck | Spectral clustering and the 50-round bootstrap are the slow stages. Give it the full 160 seconds before assuming a problem. |
 
 ## 3. What the pipeline produces
 
