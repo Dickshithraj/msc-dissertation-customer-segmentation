@@ -72,3 +72,7 @@ docs/dissertation/Marking Guidance*.pdf
 docs/
 notebooks/
 DECISIONS.md
+scripts/build_github_report.py
+scripts/build_notebook.py
+scripts/generate_report.py
+scripts/make_presentation.py
