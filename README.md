@@ -2,7 +2,7 @@
 
 ### A Framework for Customer Segmentation and Automated Cluster-Based Notification
 
-MSc Advanced Computer Science dissertation — University of Leeds, 2025/26
+MSc Advanced Computer Science dissertation University of Leeds, 2025/26
 Dickshith Raj Nagaraj (202006797)
 
 This repository contains the complete software artefact for the dissertation: a
