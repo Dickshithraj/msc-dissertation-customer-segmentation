@@ -60,7 +60,7 @@ is around 250 MB and nothing further needs to be fetched.
 python -m venv .venv
 
 # Windows
-.venv\Scriptsctivate
+.venv\Scripts\activate
 
 # macOS / Linux
 source .venv/bin/activate
@@ -81,7 +81,7 @@ This takes two to three minutes on a first install.
 
 ```bash
 # Windows
-dir dataawaj.xlsx
+dir data\raw\raj.xlsx
 # macOS / Linux
 ls -lh data/raw/raj.xlsx
 ```
